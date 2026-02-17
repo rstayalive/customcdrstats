@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module>
+    <rawname>customcdrstats</rawname>
+    <name>Custom CDR Stats</name>
+    <namespace>Customcdrstats</namespace>
+    <version>11.0.8</version>
+    <type>tool</type>
+    <license>GPLv3+</license>
+    <category>Reports</category>
+    <description>Custom module for call statistics based on CDR data. Includes reports by operators, queues, missed calls, with filters and export.</description>
+    <publisher>telephonization.ru</publisher>
+    <menuitems>
+        <customcdrstats requires_auth="true">Custom CDR Stats</customcdrstats>
+    </menuitems>
+    <supported>
+        <version>17.0</version>
+    </supported>
+</module>
