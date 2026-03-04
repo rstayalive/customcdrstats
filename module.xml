@@ -3,11 +3,11 @@
     <rawname>customcdrstats</rawname>
     <name>Custom CDR Stats</name>
     <namespace>Customcdrstats</namespace>
-    <version>11.0.8</version>
+    <version>12.1.9</version>
     <type>tool</type>
     <license>GPLv3+</license>
     <category>Reports</category>
-    <description>Custom module for call statistics based on CDR data. Includes reports by operators, queues, missed calls, with filters and export.</description>
+    <description>Простая и быстрая статистика звонков.</description>
     <publisher>telephonization.ru</publisher>
     <menuitems>
         <customcdrstats requires_auth="true">Custom CDR Stats</customcdrstats>
