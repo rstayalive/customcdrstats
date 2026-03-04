@@ -76,6 +76,25 @@ $serverName = isset($serverName) ? htmlspecialchars($serverName) : gethostname()
         color: white !important;
         border-color: #007bff;
     }
+
+.bootnav .list-group {
+    max-height: none !important;
+    overflow-y: visible !important;
+    height: auto !important;
+    padding-bottom: 30px;
+}
+.bootnav {
+    max-height: none !important;
+    overflow: visible !important;
+    height: auto !important;
+}
+#missedTable td:nth-child(7),  /* 7-я колонка — LinkedID */
+#missedTable th:nth-child(7) {
+    font-family: monospace;
+    font-size: 0.9em;
+    color: #555;
+    white-space: nowrap;
+}
 </style>
                 </div>
             </div>

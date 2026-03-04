@@ -86,8 +86,10 @@ $queuesList = isset($queuesList) ? $queuesList : [];
             <tr><th>Тип</th><th>От</th><th>Кому</th><th>Звонков</th><th>Длительность</th><th>Средняя</th><th>Отвечено</th><th>Пропущено</th><th>Дата</th></tr>
         </thead>
         <tbody>
-            <?php foreach ($data['by_ext'] as $row): ?>
-            <tr>
+            <?php foreach ($data['by_ext'] as $row): 
+                $rowClass = ($row['missed'] > 0) ? 'table-danger text-danger' : '';
+            ?>
+            <tr class="<?php echo $rowClass; ?>">
                 <td><?php echo htmlspecialchars($row['operator_type']); ?></td>
                 <td><?php echo htmlspecialchars($row['src_ext']); ?></td>
                 <td><?php echo htmlspecialchars($row['dst_ext']); ?></td>
@@ -95,7 +97,7 @@ $queuesList = isset($queuesList) ? $queuesList : [];
                 <td><?php echo $row['total_duration']; ?></td>
                 <td><?php echo round($row['avg_duration']); ?></td>
                 <td><?php echo $row['answered']; ?></td>
-                <td><?php echo $row['missed']; ?></td>
+                <td><strong><?php echo $row['missed']; ?></strong></td>
                 <td><?php echo htmlspecialchars($row['call_date']); ?></td>
             </tr>
             <?php endforeach; ?>
@@ -151,10 +153,25 @@ $(function() {
     $('#operatorsTable').DataTable({
         pageLength: 25,
         lengthMenu: [[10, 25, 50, 100, -1], [10, 25, 50, 100, "Все"]],
-        order: [[8, "desc"]],
+        order: [[8, "desc"]],   // ← сортировка по дате (колонка Дата)
         dom: '<"row"<"col-sm-6"l><"col-sm-6"f>>rt<"row"<"col-sm-12"i><"col-sm-12 text-center"p>>',
         language: { url: "https://cdn.datatables.net/plug-ins/1.13.7/i18n/ru.json" },
         buttons: ['copy', 'csv', 'excel', 'pdf', 'print']
     });
 });
+</script>
+
+<!-- Стили для выделения пропущенных звонков красным -->
+<style>
+    #operatorsTable tr.table-danger {
+        background-color: #ffe6e6 !important;
+    }
+    #operatorsTable tr.table-danger td {
+        color: #c9302c !important;
+    }
+    #operatorsTable tr.table-danger td strong {
+        color: #c9302c !important;
+        font-weight: bold;
+    }
+</style>
 </script>

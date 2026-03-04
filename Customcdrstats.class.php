@@ -192,7 +192,7 @@ public function getCallStats($start, $end, $filter = []) {
     $where = "calldate BETWEEN :start AND :end";
     $params = [':start' => $startTime, ':end' => $endTime];
 
-    // === Обработка очереди ===
+    // Очередь (если выбрана)
     if (!empty($filter['queue'])) {
         $linkedSql = "SELECT DISTINCT linkedid FROM cdr WHERE calldate BETWEEN :start AND :end AND dst = :queue";
         $sth = $this->db->prepare($linkedSql);
@@ -207,49 +207,122 @@ public function getCallStats($start, $end, $filter = []) {
         $params = array_merge([$startTime, $endTime], $linkedIds);
     }
 
-    // === переделанный запрос ===
-    $sql = "
+    // 1. Входящие (как в did_stats)
+    $inSql = "
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN disposition = 'ANSWERED' THEN 1 ELSE 0 END) as answered,
+            SUM(CASE WHEN disposition != 'ANSWERED' AND billsec = 0 THEN 1 ELSE 0 END) as missed,
+            SUM(duration) as total_duration
+        FROM cdr 
+        WHERE $where 
+          AND did != '' 
+          AND LENGTH(dst) < 8 
+          AND (outbound_cnum = '' OR outbound_cnum IS NULL)
+    ";
+    $sth = $this->db->prepare($inSql);
+    $sth->execute($params);
+    $in = $sth->fetch(\PDO::FETCH_ASSOC) ?: ['total'=>0, 'answered'=>0, 'missed'=>0, 'total_duration'=>0];
+
+    // 2. Исходящие (как в outbound_did_stats)
+    $outSql = "
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN disposition = 'ANSWERED' OR billsec > 0 THEN 1 ELSE 0 END) as answered,
+            SUM(duration) as total_duration
+        FROM cdr 
+        WHERE $where 
+          AND outbound_cnum != '' 
+          AND LENGTH(outbound_cnum) >= 7
+    ";
+    $sth = $this->db->prepare($outSql);
+    $sth->execute($params);
+    $out = $sth->fetch(\PDO::FETCH_ASSOC) ?: ['total'=>0, 'answered'=>0, 'total_duration'=>0];
+
+    // 3. Пропущенные входящие (как в missed_inbound)
+    $missedSql = "
+        SELECT COUNT(DISTINCT c.linkedid) as missed
+        FROM cdr c
+        WHERE c.calldate BETWEEN :start AND :end 
+          AND c.billsec = 0 
+          AND c.disposition != 'ANSWERED'
+          AND LENGTH(c.dst) < 8
+          AND LENGTH(c.src) > 6
+          AND (c.outbound_cnum = '' OR c.outbound_cnum IS NULL)
+          AND NOT EXISTS (
+              SELECT 1 FROM cdr a 
+              WHERE a.linkedid = c.linkedid 
+                AND a.disposition = 'ANSWERED'
+          )
+    ";
+    $sth = $this->db->prepare($missedSql);
+    $sth->execute([':start' => $startTime, ':end' => $endTime]);
+    $missed = (int)$sth->fetchColumn();
+
+    // 4. Внутренние (только для графика)
+    $internalSql = "
+        SELECT COUNT(DISTINCT linkedid) as internal
+        FROM cdr 
+        WHERE $where 
+          AND LENGTH(src) < 8 
+          AND LENGTH(dst) < 8
+    ";
+    $sth = $this->db->prepare($internalSql);
+    $sth->execute($params);
+    $internal = (int)$sth->fetchColumn();
+
+    // Итоговые метрики
+    $total_calls = (int)$in['total'] + (int)$out['total'];
+    $answered    = (int)$in['answered'] + (int)$out['answered'];
+    $missed      = $missed;  // берем строго из missed_inbound
+    $inbound     = (int)$in['total'];
+    $outbound    = (int)$out['total'];
+
+    $avg_duration = $total_calls > 0 
+        ? round(((int)$in['total_duration'] + (int)$out['total_duration']) / $total_calls, 0) 
+        : 0;
+
+    $stats = [
+        'total_calls' => $total_calls,
+        'answered'    => $answered,
+        'missed'      => $missed,
+        'avg_duration'=> $avg_duration,
+        'inbound'     => $inbound,
+        'outbound'    => $outbound,
+        'internal'    => $internal
+    ];
+
+    // === Таблица "По операторам" — только внешние звонки ===
+    $byExt = [];
+    // Чтобы заполнить таблицу, делаем отдельный запрос на внешние звонки
+    $extSql = "
         SELECT 
             linkedid,
             MIN(calldate) as call_date,
             MIN(src) as src_ext,
             MAX(dst) as dst_ext,
             MAX(billsec) as max_billsec,
-            MAX(CASE WHEN disposition = 'ANSWERED' OR billsec > 0 THEN 1 ELSE 0 END) as answered_flag
+            MAX(CASE WHEN disposition = 'ANSWERED' THEN 1 ELSE 0 END) as answered_flag
         FROM cdr 
         WHERE $where 
+          AND (
+              (LENGTH(src) > 7 AND LENGTH(dst) < 8)   -- входящие
+              OR outbound_cnum != ''                  -- исходящие
+          )
         GROUP BY linkedid 
         ORDER BY MIN(calldate)
     ";
+    $sth = $this->db->prepare($extSql);
+    $sth->execute($params);
+    $extRaw = $sth->fetchAll(\PDO::FETCH_ASSOC);
 
-    try {
-        $sth = $this->db->prepare($sql);
-        $sth->execute($params);
-        $raw = $sth->fetchAll(\PDO::FETCH_ASSOC);
-    } catch (\PDOException $e) {
-        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getCallStats error: " . $e->getMessage() . "\n", FILE_APPEND);
-        return ['stats' => ['total_calls'=>0,'answered'=>0,'missed'=>0,'avg_duration'=>0,'internal'=>0,'inbound'=>0,'outbound'=>0], 'by_ext'=>[]];
-    }
-
-    $byExt = [];
-    $stats = ['total_calls'=>0,'answered'=>0,'missed'=>0,'avg_duration'=>0,'internal'=>0,'inbound'=>0,'outbound'=>0];
-    $sumDuration = 0;
-
-    foreach ($raw as $row) {
-        $src_ext = $row['src_ext'] ?? '';
-        $dst_ext = $row['dst_ext'] ?? '';
+    foreach ($extRaw as $row) {
+        $src_ext = trim($row['src_ext'] ?? '');
+        $dst_ext = trim($row['dst_ext'] ?? '');
         $maxBillsec = (int)$row['max_billsec'];
         $answered = (int)$row['answered_flag'];
 
-        $missed = $answered ? 0 : 1;
-        if ($maxBillsec > 0 && $maxBillsec < 5 && !$answered) {
-            $missed = 1;
-            $answered = 0;
-        }
-
-        $internal = (strlen($src_ext) < 8 && strlen($dst_ext) < 8) ? 1 : 0;
-        $inbound  = (strlen($src_ext) > 7) ? 1 : 0;
-        $outbound = (strlen($dst_ext) > 7 && strlen($src_ext) < 8) ? 1 : 0;
+        $missed = ($answered == 0) ? 1 : 0;
 
         $byExt[] = [
             'operator_type' => 'Dial',
@@ -262,18 +335,6 @@ public function getCallStats($start, $end, $filter = []) {
             'missed'        => $missed,
             'call_date'     => $row['call_date']
         ];
-
-        $stats['total_calls']++;
-        $stats['answered'] += $answered;
-        $stats['missed']   += $missed;
-        $sumDuration       += $maxBillsec;
-        $stats['internal'] += $internal;
-        $stats['inbound']  += $inbound;
-        $stats['outbound'] += $outbound;
-    }
-
-    if ($stats['total_calls'] > 0) {
-        $stats['avg_duration'] = round($sumDuration / $stats['total_calls'], 2);
     }
 
     return ['stats' => $stats, 'by_ext' => $byExt];
@@ -466,6 +527,58 @@ try {
         }
     }
 
+    public function getMissedInboundCalls($start, $end) {
+        $startTime = $start . ' 00:00:00';
+        $endTime   = $end . ' 23:59:59';
+
+        $sql = "
+            SELECT 
+                c.linkedid,
+                MIN(c.calldate) as calldate,
+                MAX(c.clid) as clid,
+                MIN(c.src) as src,
+                MAX(c.dst) as dst,
+                COALESCE(MAX(c.did), 
+                    (SELECT did FROM cdr sub 
+                     WHERE sub.linkedid = c.linkedid 
+                       AND did != '' 
+                     LIMIT 1)
+                ) as did,
+                MAX(c.duration) as wait_time,
+                'NO ANSWER' as disposition
+            FROM cdr c
+            WHERE c.calldate BETWEEN :start AND :end 
+              AND c.billsec = 0 
+              AND c.disposition != 'ANSWERED'
+              AND LENGTH(c.dst) < 8                    
+              AND LENGTH(c.src) > 6                    
+              AND (c.outbound_cnum = '' OR c.outbound_cnum IS NULL)
+              AND NOT EXISTS (
+                  SELECT 1 FROM cdr answered
+                  WHERE answered.linkedid = c.linkedid
+                    AND answered.disposition = 'ANSWERED'
+              )
+            GROUP BY c.linkedid
+            ORDER BY MIN(c.calldate) DESC
+        ";
+
+        try {
+            $sth = $this->db->prepare($sql);
+            $sth->execute([':start' => $startTime, ':end' => $endTime]);
+            $rows = $sth->fetchAll(\PDO::FETCH_ASSOC);
+
+            foreach ($rows as &$row) {
+                $row['linkedid'] = $row['linkedid'] ?? '';
+            }
+            unset($row);
+
+            return $rows;
+        } catch (\PDOException $e) {
+            file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getMissedInboundCalls ERROR: " . $e->getMessage() . "\n", FILE_APPEND);
+            return [];
+        }
+    }
+
     public function showPage() {
         if (isset($_REQUEST['export']) && $_REQUEST['export'] === 'csv' && isset($_REQUEST['view']) && $_REQUEST['view'] === 'grid_stats') {
             $this->exportCsv();
@@ -591,6 +704,16 @@ try {
                     exit;
                 }
                 break;
+
+            case 'missed_inbound':
+                list($startDate, $endDate) = $this->parseDateRange();
+                $data = $this->getMissedInboundCalls($startDate, $endDate);
+                $content = load_view(__DIR__ . '/views/missed_inbound.php', [
+                    'data'      => $data,
+                    'startDate' => $startDate,
+                    'endDate'   => $endDate
+                ]);
+                break;                
 
             default:
                 $content = load_view(__DIR__ . '/views/grid_stats.php', []);
