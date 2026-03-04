@@ -294,7 +294,6 @@ public function getCallStats($start, $end, $filter = []) {
 
     // === Таблица "По операторам" — только внешние звонки ===
     $byExt = [];
-    // Чтобы заполнить таблицу, делаем отдельный запрос на внешние звонки
     $extSql = "
         SELECT 
             linkedid,
@@ -302,7 +301,8 @@ public function getCallStats($start, $end, $filter = []) {
             MIN(src) as src_ext,
             MAX(dst) as dst_ext,
             MAX(billsec) as max_billsec,
-            MAX(CASE WHEN disposition = 'ANSWERED' THEN 1 ELSE 0 END) as answered_flag
+            MAX(CASE WHEN disposition = 'ANSWERED' THEN 1 ELSE 0 END) as answered_flag,
+            MAX(outbound_cnum) as outbound_cnum_flag
         FROM cdr 
         WHERE $where 
           AND (
@@ -321,19 +321,25 @@ public function getCallStats($start, $end, $filter = []) {
         $dst_ext = trim($row['dst_ext'] ?? '');
         $maxBillsec = (int)$row['max_billsec'];
         $answered = (int)$row['answered_flag'];
+        $hasOutboundCnum = !empty(trim($row['outbound_cnum_flag']));
 
-        $missed = ($answered == 0) ? 1 : 0;
+        $is_inbound  = (strlen($src_ext) > 7 && strlen($dst_ext) < 8);
+        $is_outbound = $hasOutboundCnum || (strlen($dst_ext) > 7 && strlen($src_ext) < 8);
+
+        $missed_inbound  = ($is_inbound  && $answered == 0) ? 1 : 0;
+        $missed_outbound = ($is_outbound && $answered == 0) ? 1 : 0;
 
         $byExt[] = [
-            'operator_type' => 'Dial',
-            'src_ext'       => $src_ext,
-            'dst_ext'       => $dst_ext,
-            'calls'         => 1,
-            'total_duration'=> $maxBillsec,
-            'avg_duration'  => $maxBillsec,
-            'answered'      => $answered,
-            'missed'        => $missed,
-            'call_date'     => $row['call_date']
+            'operator_type'   => 'Dial',
+            'src_ext'         => $src_ext,
+            'dst_ext'         => $dst_ext,
+            'calls'           => 1,
+            'total_duration'  => $maxBillsec,
+            'avg_duration'    => $maxBillsec,
+            'answered'        => $answered,
+            'missed_inbound'  => $missed_inbound,
+            'missed_outbound' => $missed_outbound,
+            'call_date'       => $row['call_date']
         ];
     }
 
