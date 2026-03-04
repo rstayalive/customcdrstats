@@ -6,10 +6,6 @@ $endDate = isset($endDate) ? htmlspecialchars($endDate) : date('Y-m-d');
 $did = isset($did) ? htmlspecialchars($did) : '';
 $didsList = isset($didsList) ? $didsList : [];
 
-<<<<<<< HEAD
-=======
-// Расчёт максимума для цвета heatmap
->>>>>>> 9507c3babd468d34509803aaf7d64dd8a68eb292
 $maxCalls = 0;
 foreach ($data as $row) {
     if (isset($row['calls']) && $row['calls'] > $maxCalls) $maxCalls = $row['calls'];

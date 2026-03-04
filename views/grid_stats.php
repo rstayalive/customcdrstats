@@ -147,11 +147,7 @@ $(function() {
         options: { responsive: true, scales: { y: { beginAtZero: true } } }
     });
 
-<<<<<<< HEAD
     // DataTable
-=======
-    // DataTable — правильный порядок элементов
->>>>>>> 9507c3babd468d34509803aaf7d64dd8a68eb292
     $('#operatorsTable').DataTable({
         pageLength: 25,
         lengthMenu: [[10, 25, 50, 100, -1], [10, 25, 50, 100, "Все"]],

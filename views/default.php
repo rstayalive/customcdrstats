@@ -52,11 +52,7 @@ $serverName = isset($serverName) ? htmlspecialchars($serverName) : gethostname()
         float: left;
     }
     
-<<<<<<< HEAD
     /* Кнопки пагинации */
-=======
-    /* Кнопки пагинации — ниже, без серого фона */
->>>>>>> 9507c3babd468d34509803aaf7d64dd8a68eb292
     .dataTables_paginate {
         padding: 18px 0 55px 0 !important;
         text-align: center;

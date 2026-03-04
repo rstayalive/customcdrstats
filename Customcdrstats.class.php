@@ -185,103 +185,99 @@ class Customcdrstats implements \BMO {
         exit;
     }
 
-    public function getCallStats($start, $end, $filter = []) {
-        $startTime = $start . ' 00:00:00';
-        $endTime   = $end . ' 23:59:59';
+public function getCallStats($start, $end, $filter = []) {
+    $startTime = $start . ' 00:00:00';
+    $endTime   = $end . ' 23:59:59';
 
-        $where = "calldate BETWEEN :start AND :end";
-        $params = [':start' => $startTime, ':end' => $endTime];
+    $where = "calldate BETWEEN :start AND :end";
+    $params = [':start' => $startTime, ':end' => $endTime];
 
-        if (!empty($filter['extension'])) {
-            $where .= " AND (src = :ext OR dst = :ext)";
-            $params[':ext'] = $filter['extension'];
+    // === Обработка очереди ===
+    if (!empty($filter['queue'])) {
+        $linkedSql = "SELECT DISTINCT linkedid FROM cdr WHERE calldate BETWEEN :start AND :end AND dst = :queue";
+        $sth = $this->db->prepare($linkedSql);
+        $sth->execute([':start' => $startTime, ':end' => $endTime, ':queue' => $filter['queue']]);
+        $linkedIds = $sth->fetchAll(\PDO::FETCH_COLUMN);
+
+        if (empty($linkedIds)) {
+            return ['stats' => ['total_calls'=>0,'answered'=>0,'missed'=>0,'avg_duration'=>0,'internal'=>0,'inbound'=>0,'outbound'=>0], 'by_ext'=>[]];
         }
-        if (!empty($filter['ext_range'])) {
-            $where .= " AND (src LIKE :range OR dst LIKE :range)";
-            $params[':range'] = $filter['ext_range'] . '%';
-        }
-        if (!empty($filter['queue'])) {
-            $linkedSql = "SELECT DISTINCT linkedid FROM cdr WHERE calldate BETWEEN :start AND :end AND dst = :queue";
-            $sth = $this->db->prepare($linkedSql);
-            $sth->execute([':start' => $startTime, ':end' => $endTime, ':queue' => $filter['queue']]);
-            $linkedIds = $sth->fetchAll(\PDO::FETCH_COLUMN);
+        $placeholders = implode(',', array_fill(0, count($linkedIds), '?'));
+        $where = "calldate BETWEEN ? AND ? AND linkedid IN ($placeholders)";
+        $params = array_merge([$startTime, $endTime], $linkedIds);
+    }
 
-            if (empty($linkedIds)) {
-                return ['stats' => ['total_calls'=>0,'answered'=>0,'missed'=>0,'avg_duration'=>0,'internal'=>0,'inbound'=>0,'outbound'=>0], 'by_ext'=>[]];
-            }
-            $placeholders = implode(',', array_fill(0, count($linkedIds), '?'));
-            $where = "calldate BETWEEN ? AND ? AND linkedid IN ($placeholders)";
-            $params = array_merge([$startTime, $endTime], $linkedIds);
-        }
+    // === переделанный запрос ===
+    $sql = "
+        SELECT 
+            linkedid,
+            MIN(calldate) as call_date,
+            MIN(src) as src_ext,
+            MAX(dst) as dst_ext,
+            MAX(billsec) as max_billsec,
+            MAX(CASE WHEN disposition = 'ANSWERED' OR billsec > 0 THEN 1 ELSE 0 END) as answered_flag
+        FROM cdr 
+        WHERE $where 
+        GROUP BY linkedid 
+        ORDER BY MIN(calldate)
+    ";
 
-        $sql = "SELECT * FROM cdr WHERE $where ORDER BY calldate";
+    try {
         $sth = $this->db->prepare($sql);
         $sth->execute($params);
         $raw = $sth->fetchAll(\PDO::FETCH_ASSOC);
-
-        $grouped = [];
-        foreach ($raw as $row) {
-            $grouped[$row['linkedid']][] = $row;
-        }
-
-        $byExt = [];
-        $stats = ['total_calls'=>0,'answered'=>0,'missed'=>0,'avg_duration'=>0,'internal'=>0,'inbound'=>0,'outbound'=>0];
-        $sumDuration = 0;
-
-        foreach ($grouped as $rows) {
-            usort($rows, fn($a,$b) => strtotime($a['calldate']) - strtotime($b['calldate']));
-            $first = $rows[0];
-
-            $srcs = array_filter(array_column($rows, 'src'));
-            $dsts = array_filter(array_column($rows, 'dst'));
-            $src_ext = $srcs ? min($srcs) : '';
-            $dst_ext = $dsts ? max($dsts) : '';
-
-            $maxBillsec = max(array_column($rows, 'billsec') ?: [0]);
-            $answered = 0;
-            foreach ($rows as $r) {
-                if ($r['disposition'] === 'ANSWERED' || $r['billsec'] > 0) {
-                    $answered = 1;
-                    break;
-                }
-            }
-            $missed = $answered ? 0 : 1;
-            if ($maxBillsec > 0 && $maxBillsec < 5 && !$answered) {
-                $missed = 1; $answered = 0;
-            }
-
-            $internal = (strlen($src_ext) < 8 && strlen($dst_ext) < 8) ? 1 : 0;
-            $inbound  = (strlen($src_ext) > 7) ? 1 : 0;
-            $outbound = (strlen($dst_ext) > 7 && strlen($src_ext) < 8) ? 1 : 0;
-
-            $byExt[] = [
-                'operator_type' => 'Dial',
-                'src_ext'       => $src_ext,
-                'dst_ext'       => $dst_ext,
-                'calls'         => 1,
-                'total_duration'=> $maxBillsec,
-                'avg_duration'  => $maxBillsec,
-                'answered'      => $answered,
-                'missed'        => $missed,
-                'call_date'     => $first['calldate']
-            ];
-
-            $stats['total_calls']++;
-            $stats['answered'] += $answered;
-            $stats['missed']   += $missed;
-            $sumDuration       += $maxBillsec;
-            $stats['internal'] += $internal;
-            $stats['inbound']  += $inbound;
-            $stats['outbound'] += $outbound;
-        }
-
-        if ($stats['total_calls'] > 0) {
-            $stats['avg_duration'] = round($sumDuration / $stats['total_calls'], 2);
-        }
-
-        return ['stats' => $stats, 'by_ext' => $byExt];
+    } catch (\PDOException $e) {
+        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getCallStats error: " . $e->getMessage() . "\n", FILE_APPEND);
+        return ['stats' => ['total_calls'=>0,'answered'=>0,'missed'=>0,'avg_duration'=>0,'internal'=>0,'inbound'=>0,'outbound'=>0], 'by_ext'=>[]];
     }
 
+    $byExt = [];
+    $stats = ['total_calls'=>0,'answered'=>0,'missed'=>0,'avg_duration'=>0,'internal'=>0,'inbound'=>0,'outbound'=>0];
+    $sumDuration = 0;
+
+    foreach ($raw as $row) {
+        $src_ext = $row['src_ext'] ?? '';
+        $dst_ext = $row['dst_ext'] ?? '';
+        $maxBillsec = (int)$row['max_billsec'];
+        $answered = (int)$row['answered_flag'];
+
+        $missed = $answered ? 0 : 1;
+        if ($maxBillsec > 0 && $maxBillsec < 5 && !$answered) {
+            $missed = 1;
+            $answered = 0;
+        }
+
+        $internal = (strlen($src_ext) < 8 && strlen($dst_ext) < 8) ? 1 : 0;
+        $inbound  = (strlen($src_ext) > 7) ? 1 : 0;
+        $outbound = (strlen($dst_ext) > 7 && strlen($src_ext) < 8) ? 1 : 0;
+
+        $byExt[] = [
+            'operator_type' => 'Dial',
+            'src_ext'       => $src_ext,
+            'dst_ext'       => $dst_ext,
+            'calls'         => 1,
+            'total_duration'=> $maxBillsec,
+            'avg_duration'  => $maxBillsec,
+            'answered'      => $answered,
+            'missed'        => $missed,
+            'call_date'     => $row['call_date']
+        ];
+
+        $stats['total_calls']++;
+        $stats['answered'] += $answered;
+        $stats['missed']   += $missed;
+        $sumDuration       += $maxBillsec;
+        $stats['internal'] += $internal;
+        $stats['inbound']  += $inbound;
+        $stats['outbound'] += $outbound;
+    }
+
+    if ($stats['total_calls'] > 0) {
+        $stats['avg_duration'] = round($sumDuration / $stats['total_calls'], 2);
+    }
+
+    return ['stats' => $stats, 'by_ext' => $byExt];
+}
  
     public function getPerExtStats($start, $end, $ext) {
         $startTime = $start . ' 00:00:00';
