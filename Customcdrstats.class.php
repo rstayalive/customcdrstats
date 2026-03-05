@@ -272,7 +272,7 @@ SQL;
     $sth->execute($baseParams);
     $in = $sth->fetch(\PDO::FETCH_ASSOC) ?: ['total_inbound'=>0, 'answered_inbound'=>0, 'missed'=>0];
 
-    // === 2. ИСХОДЯЩИЕ — БЕРЁМ ТОЧНО ИЗ outbound_did_stats ===
+    // === 2. ИСХОДЯЩИЕ ===
     $outboundData = $this->getOutboundDidStats($start, $end, '');
     $summary = $outboundData['did_summary'] ?? [];
     $out = [
@@ -293,16 +293,16 @@ SQL;
     $sth->execute($baseParams);
     $internal = (int)$sth->fetchColumn();
 
-    // === ФИНАЛЬНЫЕ ЦИФРЫ (по твоему требованию) ===
+    // === ФИНАЛЬНЫЕ ЦИФРЫ ===
     $total_calls = $in['total_inbound'] + $out['total'];
-    $answered    = $in['answered_inbound'];                 // ← ТОЛЬКО отвеченные ВХОДЯЩИЕ!
+    $answered    = $in['answered_inbound']; 
     $avg_duration = $total_calls > 0 
         ? round(($in['total_inbound'] * 60 + $out['total'] * 60) / $total_calls, 0) 
         : 0;
 
     $stats = [
         'total_calls' => $total_calls,
-        'answered'    => $answered,          // теперь только входящие
+        'answered'    => $answered, 
         'missed'      => (int)$in['missed'],
         'avg_duration'=> (int)$avg_duration,
         'inbound'     => (int)$in['total_inbound'],
@@ -312,7 +312,7 @@ SQL;
 
     file_put_contents($this->logPath, date('Y-m-d H:i:s') . " [FINAL] Всего: {$stats['total_calls']} | Отвечено (только вх): {$stats['answered']} | Входящих: {$stats['inbound']} | Исходящих: {$stats['outbound']} | Внутренних: {$stats['internal']}\n", FILE_APPEND);
 
-    // === Таблица "По операторам" (оставляем без изменений) ===
+    // === Таблица состав статистики ===
     $byExt = [];
     $extParams = $baseParams;
     $allowedDids = array_keys($this->getDids());
@@ -825,7 +825,7 @@ public function getMissedInboundCalls($start, $end) {
                list($startDate, $endDate) = $this->parseDateRange();
                 $did = $_REQUEST['did'] ?? '';
             
-            // Безопасное логирование
+            // логирование
             $logDid = isset($did) && $did !== '' ? $did : '—';
             $logRange = $_REQUEST['daterange'] ?? '—';
             

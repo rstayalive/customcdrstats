@@ -111,7 +111,7 @@ $(function() {
         }
     });
 
-    // === ГРАФИК — порядок как ты просил: Входящие → Отвечено → Пропущено ===
+    // === ГРАФИК ===
     var stats = {
         inbound:  <?php echo $data['stats']['inbound'] ?? 0; ?>,
         answered: <?php echo $data['stats']['answered'] ?? 0; ?>,
