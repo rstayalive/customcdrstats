@@ -3,7 +3,7 @@
     <rawname>customcdrstats</rawname>
     <name>Custom CDR Stats</name>
     <namespace>Customcdrstats</namespace>
-    <version>12.4.2</version>
+    <version>13.0.1</version>
     <type>tool</type>
     <license>GPLv3+</license>
     <category>Reports</category>

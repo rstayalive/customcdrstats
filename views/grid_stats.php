@@ -1,12 +1,7 @@
 <?php
 $data = isset($data) ? $data : [];
 $startDate = isset($startDate) ? htmlspecialchars($startDate) : date('Y-m-d');
-$endDate = isset($endDate) ? htmlspecialchars($endDate) : date('Y-m-d');
-$extension = isset($extension) ? htmlspecialchars($extension) : '';
-$extRange = isset($extRange) ? htmlspecialchars($extRange) : '';
-$queue = isset($queue) ? htmlspecialchars($queue) : '';
-$extensionsList = isset($extensionsList) ? $extensionsList : [];
-$queuesList = isset($queuesList) ? $queuesList : [];
+$endDate   = isset($endDate)   ? htmlspecialchars($endDate)   : date('Y-m-d');
 ?>
 
 <div class="display no-border">
@@ -18,40 +13,17 @@ $queuesList = isset($queuesList) ? $queuesList : [];
                 <div class="row">
                     <div class="col-md-12">
                         <div class="row">
-                            <!-- Период -->
-                            <div class="col-md-3">
+                            <!-- Только Период -->
+                            <div class="col-md-4">
                                 <label class="control-label"><?php echo _("Период"); ?></label>
-                                <input type="text" class="form-control" id="daterange" name="daterange" value="<?php echo $startDate . ' - ' . $endDate; ?>" />
-                            </div>
-                            <!-- Extension -->
-                            <div class="col-md-2">
-                                <label class="control-label"><?php echo _("Extension"); ?></label>
-                                <select class="form-control" name="ext">
-                                    <option value="">Все</option>
-                                    <?php foreach ($extensionsList as $k => $v): ?>
-                                        <option value="<?php echo htmlspecialchars($k); ?>" <?php echo $extension==$k?'selected':''; ?>><?php echo htmlspecialchars($v); ?></option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </div>
-                            <!-- Range -->
-                            <div class="col-md-2">
-                                <label class="control-label"><?php echo _("Range"); ?></label>
-                                <input type="text" class="form-control" name="ext_range" value="<?php echo $extRange; ?>" placeholder="100-199">
-                            </div>
-                            <!-- Queue -->
-                            <div class="col-md-2">
-                                <label class="control-label"><?php echo _("Queue"); ?></label>
-                                <select class="form-control" name="queue">
-                                    <option value="">Все</option>
-                                    <?php foreach ($queuesList as $k => $v): ?>
-                                        <option value="<?php echo htmlspecialchars($k); ?>" <?php echo $queue==$k?'selected':''; ?>><?php echo htmlspecialchars($v); ?></option>
-                                    <?php endforeach; ?>
-                                </select>
+                                <input type="text" class="form-control" id="daterange" name="daterange" 
+                                       value="<?php echo $startDate . ' - ' . $endDate; ?>" />
                             </div>
                             <!-- Кнопки -->
-                            <div class="col-md-3 text-right" style="padding-top:25px;">
+                            <div class="col-md-8 text-right" style="padding-top:25px;">
                                 <button type="submit" class="btn btn-default"><?php echo _('Поиск'); ?></button>
-                                <a href="?display=customcdrstats&view=grid_stats&export=csv&start=<?php echo urlencode($startDate); ?>&end=<?php echo urlencode($endDate); ?>&ext=<?php echo urlencode($extension); ?>&ext_range=<?php echo urlencode($extRange); ?>&queue=<?php echo urlencode($queue); ?>" class="btn btn-default"><?php echo _('Экспорт CSV'); ?></a>
+                                <a href="?display=customcdrstats&view=grid_stats&export=csv&start=<?php echo urlencode($startDate); ?>&end=<?php echo urlencode($endDate); ?>" 
+                                   class="btn btn-default"><?php echo _('Экспорт CSV'); ?></a>
                             </div>
                         </div>
                     </div>
@@ -91,8 +63,8 @@ $queuesList = isset($queuesList) ? $queuesList : [];
                 <th>Длительность</th>
                 <th>Средняя</th>
                 <th>Отвечено</th>
-                <th>Пропущено</th>
-                <th>Недозвонились</th>
+                <th>Пропущено вх.</th>
+                <th>Недозвонились исх.</th>
                 <th>Дата</th>
             </tr>
         </thead>
@@ -156,8 +128,11 @@ $(function() {
         type: 'bar',
         data: {
             labels: ['Всего', 'Отвечено', 'Пропущено', 'Входящих', 'Исходящих', 'Внутренних'],
-            datasets: [{ label: 'Статистика', data: [stats.total_calls, stats.answered, stats.missed, stats.inbound, stats.outbound, stats.internal],
-                backgroundColor: ['#36a2eb','#4bc0c0','#ff6384','#36a2eb','#ff9f40','#9966ff'] }]
+            datasets: [{ 
+                label: 'Статистика', 
+                data: [stats.total_calls, stats.answered, stats.missed, stats.inbound, stats.outbound, stats.internal],
+                backgroundColor: ['#36a2eb','#4bc0c0','#ff6384','#36a2eb','#ff9f40','#9966ff'] 
+            }]
         },
         options: { responsive: true, scales: { y: { beginAtZero: true } } }
     });
@@ -166,7 +141,7 @@ $(function() {
     $('#operatorsTable').DataTable({
         pageLength: 25,
         lengthMenu: [[10, 25, 50, 100, -1], [10, 25, 50, 100, "Все"]],
-        order: [[9, "desc"]],   // ← сортировка по дате (колонка Дата)
+        order: [[9, "desc"]],
         dom: '<"row"<"col-sm-6"l><"col-sm-6"f>>rt<"row"<"col-sm-12"i><"col-sm-12 text-center"p>>',
         language: { url: "https://cdn.datatables.net/plug-ins/1.13.7/i18n/ru.json" },
         buttons: ['copy', 'csv', 'excel', 'pdf', 'print']
@@ -174,17 +149,8 @@ $(function() {
 });
 </script>
 
-<!-- Стили для выделения пропущенных звонков красным -->
 <style>
-    #operatorsTable tr.table-danger {
-        background-color: #ffe6e6 !important;
-    }
-    #operatorsTable tr.table-danger td {
-        color: #c9302c !important;
-    }
-    #operatorsTable tr.table-danger td strong {
-        color: #c9302c !important;
-        font-weight: bold;
-    }
+    #operatorsTable tr.table-danger { background-color: #ffe6e6 !important; }
+    #operatorsTable tr.table-danger td { color: #c9302c !important; }
+    #operatorsTable tr.table-danger td strong { color: #c9302c !important; font-weight: bold; }
 </style>
-</script>

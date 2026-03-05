@@ -1,8 +1,8 @@
 <?php
 $data = isset($data) ? $data : [];
 $startDate = isset($startDate) ? htmlspecialchars($startDate) : date('Y-m-d');
-$endDate = isset($endDate) ? htmlspecialchars($endDate) : date('Y-m-d');
-$queue = isset($queue) ? htmlspecialchars($queue) : '';
+$endDate   = isset($endDate)   ? htmlspecialchars($endDate)   : date('Y-m-d');
+$queue     = isset($queue)     ? htmlspecialchars($queue)     : '';
 $queuesList = isset($queuesList) ? $queuesList : [];
 ?>
 
@@ -39,21 +39,25 @@ $queuesList = isset($queuesList) ? $queuesList : [];
     </div>
 </div>
 
-<?php if (!empty($data) && !empty($queue)): ?>
+<?php if (!empty($data) && !empty($queue) && !empty($data['stats'])): ?>
     <h3>Статистика по очереди <?php echo htmlspecialchars($queue); ?></h3>
     <canvas id="queueChart" width="800" height="300"></canvas>
 
     <table class="table table-striped">
         <thead>
-            <tr><th>Всего звонков</th><th>Отвечено</th><th>Пропущено</th><th>Средняя длительность</th><th>Входящих</th></tr>
+            <tr>
+                <th>Всего входящих</th>
+                <th>Отвечено</th>
+                <th>Пропущено</th>
+                <th>Средняя длительность</th>
+            </tr>
         </thead>
         <tbody>
             <tr>
-                <td><?php echo $data['stats']['total_calls'] ?? 0; ?></td>
+                <td><?php echo $data['stats']['inbound'] ?? 0; ?></td>
                 <td><?php echo $data['stats']['answered'] ?? 0; ?></td>
                 <td><?php echo $data['stats']['missed'] ?? 0; ?></td>
                 <td><?php echo round($data['stats']['avg_duration'] ?? 0); ?> сек</td>
-                <td><?php echo $data['stats']['inbound'] ?? 0; ?></td>
             </tr>
         </tbody>
     </table>
@@ -67,15 +71,15 @@ $queuesList = isset($queuesList) ? $queuesList : [];
         <tbody>
             <?php foreach ($data['by_ext'] as $row): ?>
             <tr>
-                <td><?php echo htmlspecialchars($row['operator_type']); ?></td>
-                <td><?php echo htmlspecialchars($row['src_ext']); ?></td>
-                <td><?php echo htmlspecialchars($row['dst_ext']); ?></td>
-                <td><?php echo $row['calls']; ?></td>
-                <td><?php echo $row['total_duration']; ?></td>
-                <td><?php echo round($row['avg_duration']); ?></td>
-                <td><?php echo $row['answered']; ?></td>
-                <td><?php echo $row['missed']; ?></td>
-                <td><?php echo htmlspecialchars($row['call_date']); ?></td>
+                <td><?php echo htmlspecialchars($row['operator_type'] ?? ''); ?></td>
+                <td><?php echo htmlspecialchars($row['src_ext'] ?? ''); ?></td>
+                <td><?php echo htmlspecialchars($row['dst_ext'] ?? ''); ?></td>
+                <td><?php echo $row['calls'] ?? 0; ?></td>
+                <td><?php echo $row['total_duration'] ?? 0; ?></td>
+                <td><?php echo round($row['avg_duration'] ?? 0); ?></td>
+                <td><?php echo $row['answered'] ?? 0; ?></td>
+                <td><?php echo $row['missed'] ?? 0; ?></td>
+                <td><?php echo htmlspecialchars($row['call_date'] ?? ''); ?></td>
             </tr>
             <?php endforeach; ?>
         </tbody>
@@ -87,7 +91,6 @@ $queuesList = isset($queuesList) ? $queuesList : [];
 
 <script>
 $(function() {
-    // === Date Range Picker ===
     $('#daterange').daterangepicker({
         locale: {
             format: 'YYYY-MM-DD',
@@ -108,22 +111,21 @@ $(function() {
         }
     });
 
-    // === График очереди ===
-    var ctx = document.getElementById('queueChart').getContext('2d');
+    // === ГРАФИК — порядок как ты просил: Входящие → Отвечено → Пропущено ===
     var stats = {
-        total_calls: <?php echo $data['stats']['total_calls'] ?? 0; ?>,
+        inbound:  <?php echo $data['stats']['inbound'] ?? 0; ?>,
         answered: <?php echo $data['stats']['answered'] ?? 0; ?>,
-        missed: <?php echo $data['stats']['missed'] ?? 0; ?>,
-        inbound: <?php echo $data['stats']['inbound'] ?? 0; ?>
+        missed:   <?php echo $data['stats']['missed'] ?? 0; ?>
     };
-    new Chart(ctx, {
+
+    new Chart(document.getElementById('queueChart').getContext('2d'), {
         type: 'bar',
         data: {
-            labels: ['Всего', 'Отвечено', 'Пропущено', 'Входящих'],
+            labels: ['Всего входящих', 'Отвечено', 'Пропущено'],
             datasets: [{
-                label: 'Статистика',
-                data: [stats.total_calls, stats.answered, stats.missed, stats.inbound],
-                backgroundColor: ['#36a2eb', '#4bc0c0', '#ff6384', '#36a2eb']
+                label: 'Статистика очереди',
+                data: [stats.inbound, stats.answered, stats.missed],
+                backgroundColor: ['#36a2eb', '#4bc0c0', '#ff6384']
             }]
         },
         options: {
@@ -132,8 +134,7 @@ $(function() {
         }
     });
 
-    // === DataTable ===
-   $('#queueOperatorsTable').DataTable({
+    $('#queueOperatorsTable').DataTable({
         pageLength: 25,
         lengthMenu: [[10,25,50,100,-1],[10,25,50,100,"Все"]],
         order: [[8, "desc"]],

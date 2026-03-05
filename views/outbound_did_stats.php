@@ -51,7 +51,7 @@ foreach ($statsByHour as $row) {
     </div>
 </div>
 
-<h3>Исходящие звонки по DID <?php echo $did ? '— <b>' . htmlspecialchars($did) . '</b>' : '(по всем)'; ?></h3>
+<h3>Исходящие звонки на номера <?php echo $did ? '— <b>' . htmlspecialchars($did) . '</b>' : '(по всем)'; ?></h3>
 
 <?php if (!empty($didSummary)): ?>
 
@@ -262,9 +262,10 @@ $(function() {
                 $('#extModalLabel').text('Уникальные сотрудники для DID ' + did);
                 $('#extModal').modal('show');
             },
-            error: function() {
-                alert('Ошибка загрузки списка');
-            }
+            error: function(xhr) {
+    console.error('AJAX error:', xhr.responseText);
+    alert('Ошибка загрузки списка сотрудников. Проверьте логи /var/log/asterisk/customcdrstats.log');
+}
         });
     });
 });
