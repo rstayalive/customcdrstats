@@ -114,19 +114,21 @@ foreach ($statsByHour as $row) {
         <tbody>
             <?php foreach ($didSummary as $row): ?>
             <tr>
-                <td><strong><?php echo htmlspecialchars($row['did']); ?></strong></td>
-                <td><?php echo $row['calls']; ?></td>
-                <td><?php echo $row['answered']; ?></td>
-                <td><?php echo $row['missed']; ?></td>
-                <td><?php echo round($row['total_duration']/60, 1); ?></td>
-                <td><?php echo $row['avg_duration']; ?></td>
+                <td><strong><?php echo htmlspecialchars($row['did'] ?? '—'); ?></strong></td>
+                <td><?php echo $row['calls'] ?? 0; ?></td>
+                <td><?php echo $row['answered'] ?? 0; ?></td>
+                <td><?php echo $row['missed'] ?? 0; ?></td>
+                <td><?php echo round(($row['total_duration'] ?? 0)/60, 1); ?></td>
+                <td><?php echo $row['avg_duration'] ?? 0; ?></td>
                 <td>
-                    <?php if ($row['unique_ext'] > 0): ?>
-                        <a href="#" class="unique-ext-link" data-did="<?php echo htmlspecialchars($row['did']); ?>">
-                            <?php echo $row['unique_ext']; ?>
+                    <?php 
+                    $unique = isset($row['unique_ext']) ? (int)$row['unique_ext'] : 0;
+                    if ($unique > 0): ?>
+                        <a href="#" class="unique-ext-link" data-did="<?php echo htmlspecialchars($row['did'] ?? ''); ?>">
+                            <?php echo $unique; ?>
                         </a>
                     <?php else: ?>
-                        <?php echo $row['unique_ext']; ?>
+                        <?php echo $unique; ?>
                     <?php endif; ?>
                 </td>
             </tr>
@@ -183,7 +185,6 @@ $(function() {
     var ctx = document.getElementById('outboundDidChart').getContext('2d');
 
     <?php if (!empty($did)): ?>
-        // Конкретный DID — общая статистика
         new Chart(ctx, {
             type: 'bar',
             data: {
@@ -204,13 +205,12 @@ $(function() {
             }
         });
     <?php else: ?>
-        // Все DID — по часам
         var hours = [], calls = [], answered = [], missed = [];
         <?php foreach ($statsByHour as $row): ?>
-            hours.push('<?php echo sprintf("%02d:00", $row['hour']); ?>');
-            calls.push(<?php echo $row['calls']; ?>);
-            answered.push(<?php echo $row['answered']; ?>);
-            missed.push(<?php echo $row['missed']; ?>);
+            hours.push('<?php echo sprintf("%02d:00", $row['hour'] ?? 0); ?>');
+            calls.push(<?php echo $row['calls'] ?? 0; ?>);
+            answered.push(<?php echo $row['answered'] ?? 0; ?>);
+            missed.push(<?php echo $row['missed'] ?? 0; ?>);
         <?php endforeach; ?>
         new Chart(ctx, {
             type: 'bar',
@@ -238,16 +238,12 @@ $(function() {
         buttons: ['copy','csv','excel','pdf','print']
     });
 
-    // Клик по уник. сотрудникам
     $(document).on('click', '.unique-ext-link', function(e) {
         e.preventDefault();
         var did = $(this).data('did');
         $.ajax({
             url: '?display=customcdrstats&view=get_unique_exts',
-            data: {
-                did: did,
-                daterange: $('#daterange').val()  // передаём текущий период
-            },
+            data: { did: did, daterange: $('#daterange').val() },
             type: 'GET',
             dataType: 'json',
             success: function(response) {
@@ -263,9 +259,9 @@ $(function() {
                 $('#extModal').modal('show');
             },
             error: function(xhr) {
-    console.error('AJAX error:', xhr.responseText);
-    alert('Ошибка загрузки списка сотрудников. Проверьте логи /var/log/asterisk/customcdrstats.log');
-}
+                console.error('AJAX error:', xhr.responseText);
+                alert('Ошибка загрузки списка сотрудников. Проверьте логи /var/log/asterisk/customcdrstats.log');
+            }
         });
     });
 });
