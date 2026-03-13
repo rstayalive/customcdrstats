@@ -420,7 +420,6 @@ private function processCdrRowsInPhp(array $rows): array {
 
         $maxBillsec = max(array_column($callRows, 'billsec') ?: [0]);
 
-        // === УЛУЧШЕННАЯ ЛОГИКА ОПРЕДЕЛЕНИЯ ТИПА (теперь 100% точно) ===
         $hasExternalCaller = false;
         $realDid = '';
         foreach ($callRows as $r) {
@@ -518,7 +517,6 @@ private function processDidStatsInPhp(array $rows, $specificDid = ''): array {
         $hour = (int)substr($first['calldate'], 11, 2);
         $realDid = trim($first['did']);
 
-        // === ТОЧНО ТА ЖЕ ЛОГИКА answered_flag и max_billsec, как в старом SQL ===
         $answeredFlag = 0;
         $maxBillsec   = 0;
         foreach ($callRows as $r) {
@@ -530,7 +528,6 @@ private function processDidStatsInPhp(array $rows, $specificDid = ''): array {
 
         $missed = $answeredFlag ? 0 : 1;
 
-        // Hourly
         $hourly[$hour]['hour'] = $hour;
         $hourly[$hour]['calls']++;
         $hourly[$hour]['answered'] += $answeredFlag;
@@ -626,7 +623,6 @@ private function processOutboundDidStatsInPhp(array $rows, $specificDid = ''): a
         $summary[$cleanDid]['exts'][$ext] = true;
     }
 
-    // Финализация
     foreach ($hourly as &$h) {
         $h['avg_duration'] = $h['calls'] > 0 ? round($h['total_duration'] / $h['calls']) : 0;
     }
@@ -657,7 +653,7 @@ public function getDids() {
     try {
         $list = [];
 
-        // 1. DID из Inbound Routes FreePBX
+        // DID из Inbound Routes FreePBX
         $sql = "SELECT DISTINCT extension FROM incoming WHERE extension != '' ORDER BY extension";
         $sth = $this->configDb->query($sql);
         $dids = $sth->fetchAll(\PDO::FETCH_COLUMN);
@@ -666,10 +662,8 @@ public function getDids() {
             $did = trim($did);
             if (empty($did)) continue;
             $list[$did] = $did;
-            // БЛОК С 10-ЗНАЧНЫМИ УДАЛЁН НАВСЕГДА (был причиной дублей)
         }
 
-        // 2. Реальные номера из CDR (60 дней)
         file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getDids: добавляем реальные DID из CDR\n", FILE_APPEND);
 
         $fallbackSql = "
@@ -693,13 +687,12 @@ public function getDids() {
             }
         }
 
-        // === УДАЛЕНИЕ ВСЕХ ДУБЛЕЙ 10-значных ===
         $cleanList = [];
         foreach ($list as $key => $value) {
             if (strlen($key) === 10) {
                 $full = '7' . $key;
                 if (isset($list[$full])) {
-                    continue; // пропускаем короткий дубль
+                    continue; 
                 }
             }
             $cleanList[$key] = $value;
