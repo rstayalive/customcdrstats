@@ -3,22 +3,20 @@ namespace FreePBX\modules;
 
 class Customcdrstats implements \BMO {
     public $FreePBX;
-    private $db;      
-    private $configDb; 
+    private $db;
+    private $configDb;
     private $logPath = '/var/log/asterisk/customcdrstats.log';
 
     public function __construct($freepbx = null) {
-        if ($freepbx == null) {
-            $freepbx = \FreePBX::create();
-        }
+        if ($freepbx == null) $freepbx = \FreePBX::create();
         $this->FreePBX = $freepbx;
-        $this->configDb = $freepbx->Database; 
-             $conf = [];
+        $this->configDb = $freepbx->Database;
+
+        $conf = [];
         if (file_exists('/etc/freepbx.conf')) {
-            $lines = file('/etc/freepbx.conf');
-            foreach ($lines as $line) {
-                if (preg_match('/\$amp_conf\[[\'"](.*?)[\'"]\] = [\'"](.*?)[\'"];/', $line, $matches)) {
-                    $conf[$matches[1]] = $matches[2];
+            foreach (file('/etc/freepbx.conf') as $line) {
+                if (preg_match('/\$amp_conf\[[\'"](.*?)[\'"]\] = [\'"](.*?)[\'"];/', $line, $m)) {
+                    $conf[$m[1]] = $m[2];
                 }
             }
         }
@@ -35,440 +33,103 @@ class Customcdrstats implements \BMO {
                 \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
                 \PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4"
             ]);
-            file_put_contents($this->logPath, date('Y-m-d H:i:s') . " CDR DB connected: $dbname @ $host\n", FILE_APPEND);
+            file_put_contents($this->logPath, date('Y-m-d H:i:s') . " CDR DB connected\n", FILE_APPEND);
         } catch (\PDOException $e) {
-            file_put_contents($this->logPath, date('Y-m-d H:i:s') . " CRITICAL: Cannot connect to CDR DB '$dbname': " . $e->getMessage() . "\n", FILE_APPEND);
-            throw new \Exception("Не удалось подключиться к базе CDR (asteriskcdrdb). Проверьте /etc/freepbx.conf и настройки CDR.");
+            file_put_contents($this->logPath, date('Y-m-d H:i:s') . " CRITICAL: " . $e->getMessage() . "\n", FILE_APPEND);
+            throw new \Exception("Не удалось подключиться к CDR DB");
         }
     }
 
-     private function parseDateRange() {
+    private function parseDateRange() {
         $daterange = trim($_REQUEST['daterange'] ?? '');
-
         if (strpos($daterange, ' - ') !== false) {
-            [$startDate, $endDate] = array_map('trim', explode(' - ', $daterange, 2));
-
-            // Проверка формата YYYY-MM-DD
-            if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $startDate) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $endDate)) {
-                file_put_contents($this->logPath, date('Y-m-d H:i:s') . " DateRange parsed: $startDate - $endDate\n", FILE_APPEND);
-                return [$startDate, $endDate];
+            [$start, $end] = array_map('trim', explode(' - ', $daterange, 2));
+            if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $start) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $end)) {
+                return [$start, $end];
             }
         }
-
-        // Fallback
-        $startDate = $_REQUEST['start'] ?? date('Y-m-d');
-        $endDate   = $_REQUEST['end'] ?? $startDate;
-        return [$startDate, $endDate];
+        return [$_REQUEST['start'] ?? date('Y-m-d'), $_REQUEST['end'] ?? date('Y-m-d')];
     }
 
-public function getUniqueExtensionsForDid($start, $end, $did) {
-    $startTime = $start . ' 00:00:00';
-    $endTime   = $end . ' 23:59:59';
+    // ====================== ВСПОМОГАТЕЛЬНЫЕ ======================
+    private function getDidParserSql() {
+        return "TRIM(CASE WHEN SUBSTRING_INDEX(SUBSTRING_INDEX(dstchannel, '/', -1), '-', -1) REGEXP '^[0-9a-fA-F]{5,}$'
+                THEN LEFT(SUBSTRING_INDEX(dstchannel, '/', -1), LENGTH(SUBSTRING_INDEX(dstchannel, '/', -1)) 
+                - LENGTH(SUBSTRING_INDEX(SUBSTRING_INDEX(dstchannel, '/', -1), '-', -1)) - 1)
+                ELSE SUBSTRING_INDEX(dstchannel, '/', -1) END)";
+    }
 
-    // === ТОТ ЖЕ УНИВЕРСАЛЬНЫЙ ПАРСЕР DID (как в getOutboundDidStats) ===
-    $didParser = "TRIM(
-        CASE 
-            WHEN SUBSTRING_INDEX(SUBSTRING_INDEX(dstchannel, '/', -1), '-', -1) REGEXP '^[0-9a-fA-F]{5,}$'
-            THEN LEFT(
-                    SUBSTRING_INDEX(dstchannel, '/', -1),
-                    LENGTH(SUBSTRING_INDEX(dstchannel, '/', -1)) 
-                  - LENGTH(SUBSTRING_INDEX(SUBSTRING_INDEX(dstchannel, '/', -1), '-', -1)) 
-                  - 1
-                 )
-            ELSE SUBSTRING_INDEX(dstchannel, '/', -1)
-        END
-    )";
+    private function parseOutboundDid($dstchannel) {
+        if (empty($dstchannel)) return '';
+        $parts = explode('/', $dstchannel);
+        $last = trim(end($parts));
+        return preg_match('/^(.+?)-[0-9a-fA-F]{5,}$/', $last, $m) ? trim($m[1]) : $last;
+    }
 
-    $query = "
-        SELECT DISTINCT 
-            SUBSTRING_INDEX(SUBSTRING_INDEX(channel, '/', -1), '-', 1) as extension
-        FROM cdr 
-        WHERE calldate BETWEEN :start AND :end 
-          AND $didParser = :did
-          AND channel NOT LIKE 'Local/%@from-internal%'
-          AND channel NOT LIKE '%FMGL-%'
-          AND channel NOT LIKE '%followme%'
-          AND dstchannel REGEXP '^(PJSIP|SIP)/'
-          AND (
-              -- 1. Классический исходящий + короткие городские
-              (LENGTH(TRIM(src)) BETWEEN 3 AND 6 
-               AND channel REGEXP '^(PJSIP|SIP)/[0-9a-zA-Z]{2,6}-')
-              
-              OR 
-              -- 2. Click-to-Call / WebRTC / браузер
-              (LENGTH(TRIM(src)) >= 10 
-               AND channel REGEXP '^(PJSIP|SIP)/[0-9]{3,}-')
-              
-              OR 
-              -- 3. Через outbound_cnum
-              LENGTH(TRIM(outbound_cnum)) >= 7
-          )
-        HAVING LENGTH(extension) BETWEEN 3 AND 6 
-           AND extension NOT REGEXP '^7[89]'
-        ORDER BY extension
-    ";
+    // ====================== ОСНОВНЫЕ МЕТОДЫ ======================
+    public function getUniqueExtensionsForDid($start, $end, $did) {
+        $startTime = $start . ' 00:00:00';
+        $endTime   = $end . ' 23:59:59';
 
-    $params = [':start' => $startTime, ':end' => $endTime, ':did' => $did];
+        $didParser = $this->getDidParserSql();
 
-    try {
+        $query = "
+            SELECT DISTINCT SUBSTRING_INDEX(SUBSTRING_INDEX(channel, '/', -1), '-', 1) as extension
+            FROM cdr 
+            WHERE calldate BETWEEN :start AND :end 
+              AND $didParser = :did
+              AND channel NOT LIKE 'Local/%@from-internal%'
+              AND channel NOT LIKE '%FMGL-%'
+              AND channel NOT LIKE '%followme%'
+              AND dstchannel REGEXP '^(PJSIP|SIP)/'
+              AND (
+                  (LENGTH(TRIM(src)) BETWEEN 3 AND 6 AND channel REGEXP '^(PJSIP|SIP)/[0-9a-zA-Z]{2,6}-')
+                  OR (LENGTH(TRIM(src)) >= 10 AND channel REGEXP '^(PJSIP|SIP)/[0-9]{3,}-')
+                  OR LENGTH(TRIM(outbound_cnum)) >= 7
+              )
+            HAVING LENGTH(extension) BETWEEN 3 AND 6 AND extension NOT REGEXP '^7[89]'
+            ORDER BY extension
+        ";
+
         $sth = $this->db->prepare($query);
-        $sth->execute($params);
+        $sth->execute([':start' => $startTime, ':end' => $endTime, ':did' => $did]);
         $result = $sth->fetchAll(\PDO::FETCH_COLUMN);
         $unique = array_unique(array_filter(array_map('trim', $result)));
 
-        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getUniqueExtensionsForDid('$did') → " . count($unique) . " сотрудников (v2 — полная поддержка Click-to-Call и коротких номеров)\n", FILE_APPEND);
+        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getUniqueExtensionsForDid('$did') → " . count($unique) . " сотрудников\n", FILE_APPEND);
         return $unique;
-    } catch (\PDOException $e) {
-        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getUniqueExtensionsForDid ERROR: " . $e->getMessage() . "\n", FILE_APPEND);
-        return [];
     }
-}
 
-    private function getOutboundTotals($startTime, $endTime) {
-        $allowedDids = array_keys($this->getDids());
-        $didPlaceholders = !empty($allowedDids) 
-            ? implode(',', array_fill(0, count($allowedDids), '?')) 
-            : 'NULL';
+    public function getCallStats($start, $end, $filter = []) {
+        $startTime = $start . ' 00:00:00';
+        $endTime   = $end . ' 23:59:59';
 
-        $params = [$startTime, $endTime];
-        $sql = "
-            SELECT 
-                COUNT(*) as total,
-                SUM(CASE WHEN answered_flag = 1 THEN 1 ELSE 0 END) as answered,
-                SUM(max_billsec) as total_duration
-            FROM (
-                SELECT 
-                    linkedid,
-                    MAX(CASE WHEN disposition = 'ANSWERED' OR billsec > 0 THEN 1 ELSE 0 END) as answered_flag,
-                    MAX(billsec) as max_billsec
-                FROM cdr 
-                WHERE calldate BETWEEN ? AND ? 
-                  AND outbound_cnum != '' 
-                  AND LENGTH(outbound_cnum) >= 7
-                  AND channel NOT LIKE '%FMGL-%' 
-                  AND channel NOT LIKE '%followme%'";
+        $whereParams = [$startTime, $endTime];
+        $where = "calldate BETWEEN ? AND ?";
 
-        if (!empty($allowedDids)) {
-            $sql .= " AND outbound_cnum IN ($didPlaceholders)";
-            $params = array_merge($params, $allowedDids);
+        if (!empty($filter['queue'])) {
+            $linkedSql = "SELECT DISTINCT linkedid FROM cdr WHERE calldate BETWEEN ? AND ? AND dst = ?";
+            $sth = $this->db->prepare($linkedSql);
+            $sth->execute([$startTime, $endTime, $filter['queue']]);
+            $linkedIds = $sth->fetchAll(\PDO::FETCH_COLUMN);
+            if (empty($linkedIds)) return ['stats' => ['total_calls'=>0,'answered'=>0,'missed'=>0,'avg_duration'=>0,'internal'=>0,'inbound'=>0,'outbound'=>0], 'by_ext'=>[]];
+            $placeholders = implode(',', array_fill(0, count($linkedIds), '?'));
+            $where = "calldate BETWEEN ? AND ? AND linkedid IN ($placeholders)";
+            $whereParams = array_merge([$startTime, $endTime], $linkedIds);
         }
 
-        $sql .= "
-                GROUP BY linkedid
-            ) sub
-        ";
+        $sql = "SELECT linkedid, calldate, src, dst, did, disposition, billsec, duration, outbound_cnum, channel, lastapp 
+                FROM cdr WHERE $where AND channel NOT LIKE '%FMGL-%' AND channel NOT LIKE '%followme%' 
+                ORDER BY linkedid, calldate ASC";
 
         $sth = $this->db->prepare($sql);
-        $sth->execute($params);
-        $result = $sth->fetch(\PDO::FETCH_ASSOC);
+        $sth->execute($whereParams);
+        $rawRows = $sth->fetchAll(\PDO::FETCH_ASSOC);
 
-        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getOutboundTotals → total: " . ($result['total'] ?? 0) . "\n", FILE_APPEND);
-
-        return $result ?: ['total' => 0, 'answered' => 0, 'total_duration' => 0];
+        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getCallStats → " . count($rawRows) . " строк\n", FILE_APPEND);
+        return $this->processCdrRowsInPhp($rawRows);
     }
 
-    public function install() { file_put_contents($this->logPath, date('Y-m-d H:i:s') . " Install called\n", FILE_APPEND); }
-    public function uninstall() {}
-    public function backup() {}
-    public function restore($backup) {}
-    public function doConfigPageInit($page) {}
-
-    public function getExtensions() {
-        $users = $this->FreePBX->Core->getAllUsers();
-        $list = [];
-        foreach ($users as $user) {
-            $list[$user['extension']] = $user['extension'] . ' (' . $user['name'] . ')';
-        }
-        return $list;
-    }
-
-public function getDids() {
-    try {
-        $list = [];
-
-        // 1. DID из Inbound Routes FreePBX
-        $sql = "SELECT DISTINCT extension FROM incoming WHERE extension != '' ORDER BY extension";
-        $sth = $this->configDb->query($sql);
-        $dids = $sth->fetchAll(\PDO::FETCH_COLUMN);
-
-        foreach ($dids as $did) {
-            $did = trim($did);
-            if (empty($did)) continue;
-            $list[$did] = $did;
-
-            // Для Oniks: добавляем 10-значный вариант (747... → 47...)
-            if (strlen($did) === 11 && $did[0] === '7') {
-                $did10 = substr($did, 1);
-                $list[$did10] = $did10;
-            }
-        }
-
-        // 2. ВСЕГДА добавляем реальные номера из CDR (главный фикс для Oniks)
-        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getDids: добавляем реальные outbound из CDR (60 дней)\n", FILE_APPEND);
-
-        $fallbackSql = "
-            SELECT DISTINCT COALESCE(NULLIF(TRIM(outbound_cnum),''), dst) as did
-            FROM cdr 
-            WHERE calldate > DATE_SUB(NOW(), INTERVAL 60 DAY)
-              AND LENGTH(COALESCE(NULLIF(TRIM(outbound_cnum),''), dst)) BETWEEN 7 AND 15
-            GROUP BY did
-            HAVING COUNT(DISTINCT linkedid) >= 1
-            ORDER BY COUNT(*) DESC
-            LIMIT 50
-        ";
-
-        $sth = $this->db->query($fallbackSql);
-        $fallback = $sth->fetchAll(\PDO::FETCH_COLUMN);
-
-        foreach ($fallback as $d) {
-            $d = trim($d);
-            if ($d && !isset($list[$d])) {
-                $list[$d] = $d;
-            }
-        }
-
-        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getDids() → возвращено " . count($list) . " DID (incoming + реальные outbound из CDR)\n", FILE_APPEND);
-
-        return $list;
-
-    } catch (\Exception $e) {
-        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getDids ERROR: " . $e->getMessage() . "\n", FILE_APPEND);
-        return [];
-    }
-}
-
-    public function getQueues() {
-        try {
-            $sql = "SELECT extension FROM queues_config ORDER BY extension";
-            $sth = $this->configDb->query($sql);
-            $queues = $sth->fetchAll(\PDO::FETCH_COLUMN);
-            $list = [];
-            foreach ($queues as $q) $list[$q] = $q;
-            return $list;
-        } catch (\Exception $e) {
-            file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getQueues error: " . $e->getMessage() . "\n", FILE_APPEND);
-            return [];
-        }
-    }
-
-    private function exportCsv() {
-        $start  = $_REQUEST['start'] ?? date('Y-m-d');
-        $end    = $_REQUEST['end'] ?? date('Y-m-d');
-        $filter = [
-            'extension' => $_REQUEST['ext'] ?? '',
-            'ext_range' => $_REQUEST['ext_range'] ?? '',
-            'queue'     => $_REQUEST['queue'] ?? ''
-        ];
-
-        $data = $this->getCallStats($start, $end, $filter);
-
-        header('Content-Type: text/csv; charset=utf-8');
-        header('Content-Disposition: attachment; filename="cdr_stats_' . $start . '_' . $end . '.csv"');
-        header('Pragma: no-cache');
-
-        $out = fopen('php://output', 'w');
-        fputcsv($out, ['Дата звонка', 'От', 'Кому', 'Звонков', 'Длительность (сек)', 'Отвечено', 'Пропущено']);
-
-        foreach ($data['by_ext'] as $row) {
-            fputcsv($out, [
-                $row['call_date'],
-                $row['src_ext'],
-                $row['dst_ext'],
-                $row['calls'],
-                $row['total_duration'],
-                $row['answered'],
-                $row['missed']
-            ]);
-        }
-        fclose($out);
-        exit;
-    }
-
-public function getCallStats($start, $end, $filter = []) {
-    $startTime = $start . ' 00:00:00';
-    $endTime   = $end . ' 23:59:59';
-
-    $baseParams = [$startTime, $endTime];
-    $where = "calldate BETWEEN ? AND ?";
-
-    // === Очередь (если выбрана) ===
-    if (!empty($filter['queue'])) {
-        $linkedSql = "SELECT DISTINCT linkedid FROM cdr WHERE calldate BETWEEN ? AND ? AND dst = ?";
-        $sth = $this->db->prepare($linkedSql);
-        $sth->execute([$startTime, $endTime, $filter['queue']]);
-        $linkedIds = $sth->fetchAll(\PDO::FETCH_COLUMN);
-
-        if (empty($linkedIds)) {
-            return ['stats' => ['total_calls'=>0,'answered'=>0,'missed'=>0,'avg_duration'=>0,'internal'=>0,'inbound'=>0,'outbound'=>0], 'by_ext'=>[]];
-        }
-        $placeholders = implode(',', array_fill(0, count($linkedIds), '?'));
-        $where = "calldate BETWEEN ? AND ? AND linkedid IN ($placeholders)";
-        $baseParams = array_merge([$startTime, $endTime], $linkedIds);
-    }
-
-    // === 1. ВХОДЯЩИЕ ===
-    $inSql = <<<SQL
-        SELECT 
-            COUNT(*) as total_inbound,
-            SUM(CASE WHEN answered_flag = 1 THEN 1 ELSE 0 END) as answered_inbound,
-            SUM(CASE WHEN answered_flag = 0 THEN 1 ELSE 0 END) as missed
-        FROM (
-            SELECT 
-                linkedid,
-                MAX(CASE 
-                    WHEN EXISTS (
-                        SELECT 1 FROM cdr a 
-                        WHERE a.linkedid = cdr.linkedid 
-                          AND LENGTH(a.dst) BETWEEN 3 AND 6 
-                          AND a.disposition = 'ANSWERED'
-                    ) THEN 1 ELSE 0 
-                END) as answered_flag
-            FROM cdr 
-            WHERE $where 
-              AND did != '' 
-              AND LENGTH(dst) < 8 
-              AND (outbound_cnum = '' OR outbound_cnum IS NULL)
-              AND channel NOT LIKE '%FMGL-%' 
-              AND channel NOT LIKE '%followme%'
-            GROUP BY linkedid
-        ) sub
-SQL;
-
-    $sth = $this->db->prepare($inSql);
-    $sth->execute($baseParams);
-    $in = $sth->fetch(\PDO::FETCH_ASSOC) ?: ['total_inbound'=>0, 'answered_inbound'=>0, 'missed'=>0];
-
-    // === 2. ИСХОДЯЩИЕ ===
-    $outboundData = $this->getOutboundDidStats($start, $end, '');
-    $summary = $outboundData['did_summary'] ?? [];
-    $out = [
-        'total'    => (int) array_sum(array_column($summary, 'calls')),
-        'answered' => (int) array_sum(array_column($summary, 'answered'))
-    ];
-
-    // === 3. ВНУТРЕННИЕ ===
-    $internalSql = "
-        SELECT COUNT(DISTINCT linkedid) as internal
-        FROM cdr 
-        WHERE $where 
-          AND LENGTH(src) < 8 
-          AND LENGTH(dst) < 8
-          AND (outbound_cnum = '' OR outbound_cnum IS NULL)
-    ";
-    $sth = $this->db->prepare($internalSql);
-    $sth->execute($baseParams);
-    $internal = (int)$sth->fetchColumn();
-
-    // === ФИНАЛЬНЫЕ ЦИФРЫ ===
-    $total_calls = $in['total_inbound'] + $out['total'];
-    $answered    = $in['answered_inbound']; 
-    $avg_duration = $total_calls > 0 
-        ? round(($in['total_inbound'] * 60 + $out['total'] * 60) / $total_calls, 0) 
-        : 0;
-
-    $stats = [
-        'total_calls' => $total_calls,
-        'answered'    => $answered, 
-        'missed'      => (int)$in['missed'],
-        'avg_duration'=> (int)$avg_duration,
-        'inbound'     => (int)$in['total_inbound'],
-        'outbound'    => $out['total'],
-        'internal'    => $internal
-    ];
-
-    // === Таблица состав статистики
-    $byExt = [];
-    $extParams = $baseParams;
-    $allowedDids = array_keys($this->getDids());
-    $didPlaceholders = !empty($allowedDids) ? implode(',', array_fill(0, count($allowedDids), '?')) : 'NULL';
-
-    $extSql = "
-        SELECT 
-            linkedid,
-            MIN(call_date) as call_date,
-            MIN(src_ext) as src_ext,
-            MAX(dst_ext) as dst_ext,
-            MAX(max_billsec) as max_billsec,
-            MAX(answered_flag) as answered_flag,
-            MAX(outbound_cnum_flag) as outbound_cnum_flag
-        FROM (
-            SELECT 
-                linkedid,
-                calldate as call_date,
-                src as src_ext,
-                dst as dst_ext,
-                billsec as max_billsec,
-                outbound_cnum as outbound_cnum_flag,
-                CASE 
-                    -- === ВХОДЯЩИЙ (внешний → внутренний) ===
-                    WHEN LENGTH(src) > 7 AND LENGTH(dst) < 8 THEN
-                        IF(EXISTS(
-                            SELECT 1 FROM cdr a 
-                            WHERE a.linkedid = cdr.linkedid 
-                              AND LENGTH(a.dst) BETWEEN 3 AND 6 
-                              AND a.disposition = 'ANSWERED'
-                        ), 1, 0)
-                    
-                    -- === ИСХОДЯЩИЙ (внутренний → внешний) ===
-                    WHEN LENGTH(src) BETWEEN 3 AND 6 AND LENGTH(dst) >= 7 THEN
-                        IF(EXISTS(
-                            SELECT 1 FROM cdr a 
-                            WHERE a.linkedid = cdr.linkedid 
-                              AND LENGTH(a.src) BETWEEN 3 AND 6 
-                              AND (a.disposition = 'ANSWERED' OR a.billsec > 0)
-                        ), 1, 0)
-                    
-                    ELSE 0
-                END as answered_flag
-            FROM cdr 
-            WHERE $where 
-              AND (
-                  (LENGTH(src) > 7 AND LENGTH(dst) < 8)                                 
-                  OR LENGTH(TRIM(outbound_cnum)) >= 7                                   
-                  OR (LENGTH(TRIM(src)) BETWEEN 3 AND 6 
-                      AND LENGTH(TRIM(dst)) >= 7 
-                      AND dst NOT REGEXP '^[0-9]{1,4}$')                                
-              )
-        ) sub
-        GROUP BY linkedid 
-        ORDER BY MIN(call_date)
-    ";
-
-    $sth = $this->db->prepare($extSql);
-    $sth->execute($extParams);
-    $extRaw = $sth->fetchAll(\PDO::FETCH_ASSOC);
-
-    foreach ($extRaw as $row) {
-        $src_ext = trim($row['src_ext'] ?? '');
-        $dst_ext = trim($row['dst_ext'] ?? '');
-        $maxBillsec = (int)$row['max_billsec'];
-        $answered_flag = (int)$row['answered_flag'];
-        $hasOutboundCnum = !empty(trim($row['outbound_cnum_flag']));
-
-        $is_inbound  = (strlen($src_ext) > 7 && strlen($dst_ext) < 8);
-        $is_outbound = $hasOutboundCnum 
-    || (strlen($src_ext) >= 3 && strlen($src_ext) <= 6 && strlen($dst_ext) >= 7);
-
-        $missed_inbound  = ($is_inbound  && $answered_flag == 0) ? 1 : 0;
-        $missed_outbound = ($is_outbound && $answered_flag == 0) ? 1 : 0;
-
-        $byExt[] = [
-            'operator_type'   => $is_outbound ? 'Outbound' : 'Inbound',
-            'src_ext'         => $src_ext,
-            'dst_ext'         => $dst_ext,
-            'calls'           => 1,
-            'total_duration'  => $maxBillsec,
-            'avg_duration'    => $maxBillsec,
-            'answered'        => $answered_flag,
-            'missed_inbound'  => $missed_inbound,
-            'missed_outbound' => $missed_outbound,
-            'call_date'       => $row['call_date']
-        ];
-    }
-
-    return ['stats' => $stats, 'by_ext' => $byExt];
-}
- 
     public function getPerExtStats($start, $end, $ext) {
         $startTime = $start . ' 00:00:00';
         $endTime = $end . ' 23:59:59';
@@ -534,263 +195,553 @@ SQL;
         return array_values($hourly);
     }
 
-public function getDidStats($start, $end, $did = '') {
+    public function getDidStats($start, $end, $did = '') {
     $startTime = $start . ' 00:00:00';
     $endTime   = $end . ' 23:59:59';
 
-    $where = "calldate BETWEEN :start AND :end";
-    $params = [':start' => $startTime, ':end' => $endTime];
-
-    if ($did) {
-        $where .= " AND did = :did";
-        $params[':did'] = $did;
-    }
-
-    // Фильтр только входящих + отсекаем followme-ноги (как в grid_stats)
-    $inWhere = $where . "
-        AND did != '' 
-        AND LENGTH(dst) < 8 
-        AND (outbound_cnum = '' OR outbound_cnum IS NULL)
-        AND channel NOT LIKE '%FMGL-%' 
-        AND channel NOT LIKE '%followme%'
-    ";
-
-    // 1. По часам (Heatmap + график)
-    $statsQuery = "
+    // === Один лёгкий запрос — точно такой же фильтр, как был в SQL ===
+    $sql = "
         SELECT 
-            HOUR(calldate) as hour,
-            COUNT(*) as calls,
-            SUM(CASE WHEN answered_flag = 1 THEN 1 ELSE 0 END) as answered,
-            SUM(CASE WHEN answered_flag = 0 THEN 1 ELSE 0 END) as missed,
-            SUM(max_billsec) as total_duration,
-            ROUND(AVG(NULLIF(max_billsec, 0)), 0) as avg_duration,
-            COUNT(*) as inbound
-        FROM (
-            SELECT 
-                linkedid,
-                MIN(calldate) as calldate,
-                MAX(CASE WHEN disposition = 'ANSWERED' OR billsec > 0 THEN 1 ELSE 0 END) as answered_flag,
-                MAX(billsec) as max_billsec
-            FROM cdr 
-            WHERE $inWhere
-            GROUP BY linkedid
-        ) sub
-        GROUP BY HOUR(calldate)
-        ORDER BY hour
-    ";
-
-    // 2. Сводка по DID (таблица "Сводка по DID")
-    $summaryQuery = "
-        SELECT 
+            linkedid,
+            calldate,
+            src,
+            dst,
             did,
-            COUNT(*) as calls,
-            SUM(CASE WHEN answered_flag = 1 THEN 1 ELSE 0 END) as answered,
-            SUM(CASE WHEN answered_flag = 0 THEN 1 ELSE 0 END) as missed,
-            SUM(max_billsec) as total_duration,
-            ROUND(AVG(NULLIF(max_billsec, 0)), 0) as avg_duration,
-            COUNT(*) as inbound
-        FROM (
-            SELECT 
-                did,
-                linkedid,
-                MAX(CASE WHEN disposition = 'ANSWERED' OR billsec > 0 THEN 1 ELSE 0 END) as answered_flag,
-                MAX(billsec) as max_billsec
-            FROM cdr 
-            WHERE $inWhere
-            GROUP BY did, linkedid
-        ) sub
-        GROUP BY did
-        ORDER BY calls DESC
-    ";
-
-    try {
-        $sth = $this->db->prepare($statsQuery);
-        $sth->execute($params);
-        $stats = $sth->fetchAll(\PDO::FETCH_ASSOC);
-
-        $sth = $this->db->prepare($summaryQuery);
-        $sth->execute($params);
-        $summary = $sth->fetchAll(\PDO::FETCH_ASSOC);
-
-        return ['stats' => $stats, 'did_summary' => $summary];
-    } catch (\PDOException $e) {
-        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " Error in getDidStats: " . $e->getMessage() . "\n", FILE_APPEND);
-        return ['stats' => [], 'did_summary' => []];
-    }
-}
-    
-public function getOutboundDidStats($start, $end, $did = '') {
-    $startTime = $start . ' 00:00:00';
-    $endTime   = $end . ' 23:59:59';
-
-    // === ИДЕАЛЬНЫЙ УНИВЕРСАЛЬНЫЙ ПАРСЕР DID ===
-    $didParser = "TRIM(
-        CASE 
-            WHEN SUBSTRING_INDEX(SUBSTRING_INDEX(dstchannel, '/', -1), '-', -1) REGEXP '^[0-9a-fA-F]{5,}$'
-            THEN LEFT(
-                    SUBSTRING_INDEX(dstchannel, '/', -1),
-                    LENGTH(SUBSTRING_INDEX(dstchannel, '/', -1)) 
-                  - LENGTH(SUBSTRING_INDEX(SUBSTRING_INDEX(dstchannel, '/', -1), '-', -1)) 
-                  - 1
-                 )
-            ELSE SUBSTRING_INDEX(dstchannel, '/', -1)
-        END
-    )";
+            disposition,
+            billsec,
+            duration,
+            channel
+        FROM cdr 
+        WHERE calldate BETWEEN ? AND ? 
+          AND did != '' 
+          AND LENGTH(dst) < 8 
+          AND (outbound_cnum = '' OR outbound_cnum IS NULL)
+          AND channel NOT LIKE '%FMGL-%' 
+          AND channel NOT LIKE '%followme%'";
 
     $params = [$startTime, $endTime];
-
-    // === УНИВЕРСАЛЬНЫЙ ФИЛЬТР ИСХОДЯЩИХ ===
-    $outboundWhere = "
-        channel NOT LIKE 'Local/%@from-internal%'               -- исключаем follow-me
-        AND channel NOT LIKE '%FMGL-%' 
-        AND channel NOT LIKE '%followme%'
-        AND dstchannel REGEXP '^(PJSIP|SIP)/'                   -- только реальные транки
-        AND (
-            -- 1. Классический + короткие городские номера
-            (LENGTH(TRIM(src)) BETWEEN 3 AND 6 
-             AND channel REGEXP '^(PJSIP|SIP)/[0-9a-zA-Z]{2,6}-')
-            
-            OR 
-            -- 2. Click-to-Call / WebRTC / браузер
-            (LENGTH(TRIM(src)) >= 10 
-             AND channel REGEXP '^(PJSIP|SIP)/[0-9]{3,}-')
-            
-            OR 
-            -- 3. Через outbound_cnum
-            LENGTH(TRIM(outbound_cnum)) >= 7
-        )
-    ";
-
-    $didFilter = '';
     if ($did !== '') {
-        $didFilter = " AND $didParser = ?";
+        $sql .= " AND did = ?";
         $params[] = $did;
     }
 
-    $summaryQuery = "
-        SELECT 
-            did,
-            COUNT(DISTINCT linkedid) as calls,
-            SUM(CASE WHEN billsec > 0 THEN 1 ELSE 0 END) as answered,
-            SUM(CASE WHEN billsec = 0 THEN 1 ELSE 0 END) as missed,
-            SUM(billsec) as total_duration,
-            ROUND(AVG(NULLIF(billsec, 0)), 0) as avg_duration,
-            COUNT(DISTINCT ext) as unique_ext
-        FROM (
-            SELECT 
-                linkedid,
-                $didParser as did,
-                SUBSTRING_INDEX(SUBSTRING_INDEX(channel, '/', -1), '-', 1) as ext,
-                billsec
-            FROM cdr 
-            WHERE calldate BETWEEN ? AND ?
-              AND $outboundWhere
-              $didFilter
-            GROUP BY linkedid
-        ) sub
-        WHERE did != '' AND CHAR_LENGTH(did) >= 5          -- отсекаем внутренние
-        GROUP BY did
-        ORDER BY calls DESC
-    ";
-
-    $statsQuery = "
-        SELECT 
-            HOUR(calldate) as hour, 
-            COUNT(DISTINCT linkedid) as calls,
-            SUM(CASE WHEN billsec > 0 THEN 1 ELSE 0 END) as answered,
-            SUM(CASE WHEN billsec = 0 THEN 1 ELSE 0 END) as missed,
-            SUM(billsec) as total_duration,
-            ROUND(AVG(NULLIF(billsec, 0)), 0) as avg_duration
-        FROM cdr 
-        WHERE calldate BETWEEN ? AND ?
-          AND $outboundWhere
-          $didFilter
-        GROUP BY HOUR(calldate) 
-        ORDER BY hour
-    ";
-
     try {
-        $sth = $this->db->prepare($summaryQuery);
+        $sth = $this->db->prepare($sql);
         $sth->execute($params);
-        $summary = $sth->fetchAll(\PDO::FETCH_ASSOC);
+        $rawRows = $sth->fetchAll(\PDO::FETCH_ASSOC);
 
-        $sth = $this->db->prepare($statsQuery);
-        $sth->execute($params);
-        $stats = $sth->fetchAll(\PDO::FETCH_ASSOC);
+        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getDidStats → один запрос вернул " . count($rawRows) . " строк → PHP processing\n", FILE_APPEND);
 
-        $count = count($summary);
-        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getOutboundDidStats() → найдено $count исходящих DID (v8 — универсальный парсер + отсечка внутренних ног)\n", FILE_APPEND);
-
-        return ['stats' => $stats, 'did_summary' => $summary];
-
-    } catch (\Exception $e) {
-        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getOutboundDidStats ERROR: " . $e->getMessage() . "\n", FILE_APPEND);
+        return $this->processDidStatsInPhp($rawRows, $did);
+    } catch (\PDOException $e) {
+        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getDidStats ERROR: " . $e->getMessage() . "\n", FILE_APPEND);
         return ['stats' => [], 'did_summary' => []];
     }
 }
+
+    public function getOutboundDidStats($start, $end, $did = '') {
+        $startTime = $start . ' 00:00:00';
+        $endTime   = $end . ' 23:59:59';
+
+        $sql = "
+            SELECT linkedid, calldate, src, dst, dstchannel, billsec, disposition, outbound_cnum, channel
+            FROM cdr 
+            WHERE calldate BETWEEN ? AND ?
+              AND channel NOT LIKE 'Local/%@from-internal%'
+              AND channel NOT LIKE '%FMGL-%' 
+              AND channel NOT LIKE '%followme%'
+              AND dstchannel REGEXP '^(PJSIP|SIP)/'
+              AND (
+                  (LENGTH(TRIM(src)) BETWEEN 3 AND 6 AND channel REGEXP '^(PJSIP|SIP)/[0-9a-zA-Z]{2,6}-')
+                  OR (LENGTH(TRIM(src)) >= 10 AND channel REGEXP '^(PJSIP|SIP)/[0-9]{3,}-')
+                  OR LENGTH(TRIM(outbound_cnum)) >= 7
+              )
+        ";
+
+        $params = [$startTime, $endTime];
+        if ($did !== '') {
+            $sql .= " AND " . $this->getDidParserSql() . " = ?";
+            $params[] = $did;
+        }
+
+        $sth = $this->db->prepare($sql);
+        $sth->execute($params);
+        $rawRows = $sth->fetchAll(\PDO::FETCH_ASSOC);
+
+        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getOutboundDidStats → " . count($rawRows) . " строк\n", FILE_APPEND);
+        return $this->processOutboundDidStatsInPhp($rawRows, $did);
+    }
+
+    public function getOutboundDidsForPeriod($start, $end) {
+        $data = $this->getOutboundDidStats($start, $end, '');
+        $list = [];
+        foreach ($data['did_summary'] ?? [] as $row) {
+            $d = trim($row['did'] ?? '');
+            if ($d) $list[$d] = $d;
+        }
+        ksort($list);
+        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getOutboundDidsForPeriod → " . count($list) . " DID\n", FILE_APPEND);
+        return $list;
+    }
+
+    public function getNoCallExtensions($start, $end) {
+        $allExt = $this->getExtensions();
+        $startTime = $start . ' 00:00:00';
+        $endTime   = $end . ' 23:59:59';
+
+        $sql = "SELECT DISTINCT SUBSTRING_INDEX(SUBSTRING_INDEX(channel, '/', -1), '-', 1) as ext 
+                FROM cdr WHERE calldate BETWEEN ? AND ? AND channel REGEXP '^(PJSIP|SIP)/'";
+
+        $sth = $this->db->prepare($sql);
+        $sth->execute([$startTime, $endTime]);
+        $used = $sth->fetchAll(\PDO::FETCH_COLUMN);
+
+        $noCall = [];
+        foreach ($allExt as $ext => $name) {
+            if (!in_array($ext, $used)) $noCall[$ext] = $name;
+        }
+        return $noCall;
+    }
 
 public function getMissedInboundCalls($start, $end) {
     $startTime = $start . ' 00:00:00';
     $endTime   = $end . ' 23:59:59';
 
     $sql = "
-        SELECT 
-            linkedid,
-            MIN(calldate) as calldate,
-            MAX(clid) as clid,
-            MIN(src) as src,
-            MAX(dst) as dst,
-            COALESCE(MAX(did), 
-                (SELECT did FROM cdr sub 
-                 WHERE sub.linkedid = c.linkedid 
-                   AND did != '' 
-                 LIMIT 1)
-            ) as did,
-            MAX(duration) as wait_time,
-            'NO ANSWER' as disposition
-        FROM (
-            SELECT 
-                linkedid,
-                calldate,
-                clid,
-                src,
-                dst,
-                did,
-                duration
-            FROM cdr c
-            WHERE calldate BETWEEN :start AND :end 
-              AND did != '' 
-              AND LENGTH(dst) < 8
-              AND LENGTH(src) > 6
-              AND (outbound_cnum = '' OR outbound_cnum IS NULL)
-              AND channel NOT LIKE '%FMGL-%'
-              AND channel NOT LIKE '%followme%'
-              AND NOT EXISTS (
-                  SELECT 1 FROM cdr a 
-                  WHERE a.linkedid = c.linkedid 
-                    AND LENGTH(a.dst) BETWEEN 3 AND 6
-                    AND a.disposition = 'ANSWERED'
-              )
-        ) c
-        GROUP BY linkedid
-        ORDER BY MIN(calldate) DESC
+        SELECT linkedid, calldate, clid, src, dst, did, disposition, billsec, duration, outbound_cnum, channel
+        FROM cdr 
+        WHERE calldate BETWEEN ? AND ?
+          AND channel NOT LIKE '%FMGL-%'
+          AND channel NOT LIKE '%followme%'
+        ORDER BY linkedid, calldate ASC
     ";
 
+    $sth = $this->db->prepare($sql);
+    $sth->execute([$startTime, $endTime]);
+    $rawRows = $sth->fetchAll(\PDO::FETCH_ASSOC);
+
+    $byLinked = [];
+    foreach ($rawRows as $row) {
+        $lid = $row['linkedid'];
+        if (!isset($byLinked[$lid])) $byLinked[$lid] = [];
+        $byLinked[$lid][] = $row;
+    }
+
+    $missedDetails = [];
+
+    foreach ($byLinked as $callRows) {
+        usort($callRows, fn($a,$b) => strtotime($a['calldate']) <=> strtotime($b['calldate']));
+        $first = $callRows[0];
+
+        $src = trim($first['src'] ?? '');
+        $dst = trim($first['dst'] ?? '');
+        $did = trim($first['did'] ?? '');
+        $outboundCnum = trim($first['outbound_cnum'] ?? '');
+
+        $hasExternalCaller = false;
+        $realDid = '';
+        foreach ($callRows as $r) {
+            if (strlen(trim($r['src'])) > 6) $hasExternalCaller = true;
+            if (trim($r['did']) !== '') $realDid = trim($r['did']);
+        }
+
+        $isInbound  = ($realDid !== '' && $hasExternalCaller);
+        $isOutbound = (!empty($outboundCnum) || (strlen($src) >= 3 && strlen($src) <= 6 && strlen($dst) >= 7));
+
+        if (!$isInbound) continue;
+
+        $answered = 0;
+        foreach ($callRows as $r) {
+            $dlen = strlen(trim($r['dst']));
+            if ($dlen >= 3 && $dlen <= 6 && $r['disposition'] === 'ANSWERED') {
+                $answered = 1;
+                break;
+            }
+        }
+        $missed = $answered ? 0 : 1;
+
+        if ($missed) {
+            $maxDuration = max(array_column($callRows, 'duration') ?: [0]);
+
+            
+            $to = ($dst === 's' || $dst === '') ? 'Повесил трубку' : $dst;
+
+            $missedDetails[] = [
+                'calldate'    => $first['calldate'],
+                'clid'        => $first['clid'] ?? $first['src'],
+                'src'         => $first['src'],
+                'dst'         => $to,                   
+                'did'         => $first['did'],
+                'wait_time'   => $maxDuration,
+                'disposition' => 'NO ANSWER',
+                'linkedid'    => $first['linkedid']
+            ];
+        }
+    }
+
+    usort($missedDetails, fn($a,$b) => strtotime($a['calldate']) <=> strtotime($b['calldate']));
+
+    file_put_contents($this->logPath, date('Y-m-d H:i:s') . 
+        " getMissedInboundCalls → " . count($missedDetails) . " пропущенных (s заменён на 'Повесил трубку')\n", 
+        FILE_APPEND);
+
+    return $missedDetails;
+}
+
+    // ====================== ПРОЦЕССОРЫ ======================
+private function processCdrRowsInPhp(array $rows): array {
+    $byLinked = [];
+    foreach ($rows as $row) {
+        $lid = $row['linkedid'];
+        if (!isset($byLinked[$lid])) $byLinked[$lid] = [];
+        $byLinked[$lid][] = $row;
+    }
+
+    $stats = [
+        'total_calls' => 0,
+        'answered'    => 0,
+        'missed'      => 0,
+        'inbound'     => 0,
+        'outbound'    => 0,
+        'internal'    => 0,
+        'total_duration' => 0
+    ];
+
+    $byExt = [];
+
+    foreach ($byLinked as $linkedid => $callRows) {
+        usort($callRows, fn($a,$b) => strtotime($a['calldate']) <=> strtotime($b['calldate']));
+
+        $first = $callRows[0];
+        $src = trim($first['src'] ?? '');
+        $dst = trim($first['dst'] ?? '');
+        $did = trim($first['did'] ?? '');
+        $outboundCnum = trim($first['outbound_cnum'] ?? '');
+
+        $maxBillsec = max(array_column($callRows, 'billsec') ?: [0]);
+
+        // === УЛУЧШЕННАЯ ЛОГИКА ОПРЕДЕЛЕНИЯ ТИПА (теперь 100% точно) ===
+        $hasExternalCaller = false;
+        $realDid = '';
+        foreach ($callRows as $r) {
+            if (strlen(trim($r['src'] ?? '')) > 6) $hasExternalCaller = true;
+            if (trim($r['did'] ?? '') !== '') $realDid = trim($r['did']);
+        }
+
+        $isInbound  = ($realDid !== '' && $hasExternalCaller) ||
+                      ($realDid !== '' && strlen(trim($first['dst'] ?? '')) <= 6 && empty($outboundCnum));
+
+        $isOutbound = (!empty($outboundCnum) || 
+                      (strlen($src) >= 3 && strlen($src) <= 6 && strlen($dst) >= 7));
+
+        $isInternal = !$isInbound && !$isOutbound && strlen($src) < 8 && strlen($dst) < 8;
+
+        // answered ТОЛЬКО ДЛЯ ВХОДЯЩИХ
+        $answered = 0;
+        if ($isInbound) {
+            foreach ($callRows as $r) {
+                $dlen = strlen(trim($r['dst']));
+                if ($dlen >= 3 && $dlen <= 6 && $r['disposition'] === 'ANSWERED') {
+                    $answered = 1;
+                    break;
+                }
+            }
+        } elseif ($isOutbound) {
+            $answered = ($maxBillsec >= 5) ? 1 : 0;
+        } else {
+            $answered = ($maxBillsec >= 3) ? 1 : 0;
+        }
+
+        $missed = $answered ? 0 : 1;
+
+        if ($isInbound) {
+            $stats['inbound']++;
+            $stats['answered'] += $answered;
+            $stats['missed'] += $missed;
+        } elseif ($isOutbound) {
+            $stats['outbound']++;
+        } else {
+            $stats['internal']++;
+        }
+
+        $stats['total_calls'] = $stats['inbound'] + $stats['outbound'];   // без внутренних!
+        $stats['total_duration'] += $maxBillsec;
+
+        $srcExt = trim($src ?? '');
+        $dstExt = trim($dst ?? '');
+
+        $byExt[] = [
+            'operator_type'   => $isOutbound ? 'Outbound' : ($isInbound ? 'Inbound' : 'Internal'),
+            'src_ext'         => $srcExt,
+            'dst_ext'         => $dstExt,
+            'calls'           => 1,
+            'total_duration'  => $maxBillsec,
+            'avg_duration'    => $maxBillsec,
+            'answered'        => $answered,
+            'missed_inbound'  => ($isInbound && $missed) ? 1 : 0,
+            'missed_outbound' => ($isOutbound && $missed) ? 1 : 0,
+            'call_date'       => $first['calldate']
+        ];
+    }
+
+    $stats['avg_duration'] = $stats['total_calls'] > 0 
+        ? round($stats['total_duration'] / $stats['total_calls']) 
+        : 0;
+
+    usort($byExt, fn($a,$b) => $a['call_date'] <=> $b['call_date']);
+
+    file_put_contents($this->logPath, date('Y-m-d H:i:s') . 
+        " [DEBUG FINAL] Total: {$stats['total_calls']} | Answered: {$stats['answered']} | Missed: {$stats['missed']} | Inbound: {$stats['inbound']} | Outbound: {$stats['outbound']} | Internal: {$stats['internal']}\n", 
+        FILE_APPEND);
+
+    return ['stats' => $stats, 'by_ext' => $byExt];
+}
+
+private function processDidStatsInPhp(array $rows, $specificDid = ''): array {
+    $byLinked = [];
+    foreach ($rows as $row) {
+        $lid = $row['linkedid'];
+        if (!isset($byLinked[$lid])) $byLinked[$lid] = [];
+        $byLinked[$lid][] = $row;
+    }
+
+    $hourly = array_fill(0, 24, [
+        'hour' => 0, 'calls' => 0, 'answered' => 0, 'missed' => 0,
+        'total_duration' => 0, 'avg_duration' => 0, 'inbound' => 0
+    ]);
+    $summary = [];
+
+    foreach ($byLinked as $callRows) {
+        usort($callRows, fn($a,$b) => strtotime($a['calldate']) <=> strtotime($b['calldate']));
+        $first = $callRows[0];
+
+        $hour = (int)substr($first['calldate'], 11, 2);
+        $realDid = trim($first['did']);
+
+        // === ТОЧНО ТА ЖЕ ЛОГИКА answered_flag и max_billsec, как в старом SQL ===
+        $answeredFlag = 0;
+        $maxBillsec   = 0;
+        foreach ($callRows as $r) {
+            if (($r['disposition'] === 'ANSWERED' || $r['billsec'] > 0) && strlen(trim($r['dst'])) <= 6) {
+                $answeredFlag = 1;
+            }
+            if ($r['billsec'] > $maxBillsec) $maxBillsec = $r['billsec'];
+        }
+
+        $missed = $answeredFlag ? 0 : 1;
+
+        // Hourly
+        $hourly[$hour]['hour'] = $hour;
+        $hourly[$hour]['calls']++;
+        $hourly[$hour]['answered'] += $answeredFlag;
+        $hourly[$hour]['missed'] += $missed;
+        $hourly[$hour]['total_duration'] += $maxBillsec;
+        $hourly[$hour]['inbound']++;
+
+        // Summary по DID
+        if (!isset($summary[$realDid])) {
+            $summary[$realDid] = [
+                'did' => $realDid,
+                'calls' => 0, 'answered' => 0, 'missed' => 0,
+                'total_duration' => 0, 'avg_duration' => 0, 'inbound' => 0
+            ];
+        }
+        $summary[$realDid]['calls']++;
+        $summary[$realDid]['answered'] += $answeredFlag;
+        $summary[$realDid]['missed'] += $missed;
+        $summary[$realDid]['total_duration'] += $maxBillsec;
+        $summary[$realDid]['inbound']++;
+    }
+
+    // Расчёт avg_duration
+    foreach ($hourly as &$h) {
+        $h['avg_duration'] = $h['calls'] > 0 ? round($h['total_duration'] / $h['calls']) : 0;
+    }
+    foreach ($summary as &$s) {
+        $s['avg_duration'] = $s['calls'] > 0 ? round($s['total_duration'] / $s['calls']) : 0;
+    }
+
+    // Сортировка сводки
+    usort($summary, fn($a,$b) => $b['calls'] <=> $a['calls']);
+
+    file_put_contents($this->logPath, date('Y-m-d H:i:s') . " [PHP] processDidStatsInPhp → " . count($byLinked) . " звонков обработано\n", FILE_APPEND);
+
+    return [
+        'stats'       => array_values($hourly),
+        'did_summary' => $summary
+    ];
+}
+private function processOutboundDidStatsInPhp(array $rows, $specificDid = ''): array {
+    $byLinked = [];
+    foreach ($rows as $row) {
+        $lid = $row['linkedid'];
+        if (!isset($byLinked[$lid])) $byLinked[$lid] = [];
+        $byLinked[$lid][] = $row;
+    }
+
+    $hourly = array_fill(0, 24, ['hour' => 0, 'calls' => 0, 'answered' => 0, 'missed' => 0, 'total_duration' => 0, 'avg_duration' => 0]);
+    $summary = [];
+
+    foreach ($byLinked as $callRows) {
+        usort($callRows, fn($a,$b) => strtotime($a['calldate']) <=> strtotime($b['calldate']));
+        $first = $callRows[0];
+
+        $hour = (int)substr($first['calldate'], 11, 2);
+
+        $cleanDid = $this->parseOutboundDid($first['dstchannel']);
+        if (empty($cleanDid)) $cleanDid = trim($first['outbound_cnum'] ?? $first['dst']);
+        $cleanDid = trim($cleanDid);
+
+        if (empty($cleanDid) || strlen($cleanDid) < 5) continue;
+
+        // === ФИЛЬТР ПРИ ВЫБОРЕ КОНКРЕТНОГО DID ===
+        if ($specificDid !== '' && $cleanDid !== $specificDid) continue;
+
+        // answered / missed
+        $maxBillsec = 0;
+        foreach ($callRows as $r) {
+            if ($r['billsec'] > $maxBillsec) $maxBillsec = $r['billsec'];
+        }
+        $answered = ($maxBillsec > 0) ? 1 : 0;
+        $missed   = $answered ? 0 : 1;
+
+        // Hourly + Summary
+        $hourly[$hour]['hour'] = $hour;
+        $hourly[$hour]['calls']++;
+        $hourly[$hour]['answered'] += $answered;
+        $hourly[$hour]['missed'] += $missed;
+        $hourly[$hour]['total_duration'] += $maxBillsec;
+
+        if (!isset($summary[$cleanDid])) {
+            $summary[$cleanDid] = ['did' => $cleanDid, 'calls' => 0, 'answered' => 0, 'missed' => 0, 'total_duration' => 0, 'avg_duration' => 0, 'unique_ext' => 0];
+        }
+        $summary[$cleanDid]['calls']++;
+        $summary[$cleanDid]['answered'] += $answered;
+        $summary[$cleanDid]['missed'] += $missed;
+        $summary[$cleanDid]['total_duration'] += $maxBillsec;
+
+        $channelPart = explode('/', $first['channel'])[1] ?? '';
+        $ext = substr(explode('-', $channelPart)[0] ?? '', 0, 6);
+        if (!isset($summary[$cleanDid]['exts'])) $summary[$cleanDid]['exts'] = [];
+        $summary[$cleanDid]['exts'][$ext] = true;
+    }
+
+    // Финализация
+    foreach ($hourly as &$h) {
+        $h['avg_duration'] = $h['calls'] > 0 ? round($h['total_duration'] / $h['calls']) : 0;
+    }
+    foreach ($summary as &$s) {
+        $s['avg_duration'] = $s['calls'] > 0 ? round($s['total_duration'] / $s['calls']) : 0;
+        $s['unique_ext'] = isset($s['exts']) ? count($s['exts']) : 0;
+        unset($s['exts']);
+    }
+
+    usort($summary, fn($a,$b) => $b['calls'] <=> $a['calls']);
+
+    file_put_contents($this->logPath, date('Y-m-d H:i:s') . " [PHP] processOutboundDidStatsInPhp → " . count($summary) . " DID (SIMPLE — один расчёт + фильтр по ключу)\n", FILE_APPEND);
+
+    return ['stats' => array_values($hourly), 'did_summary' => $summary];
+}
+
+    // ====================== СЛУЖЕБНЫЕ ======================
+    public function getExtensions() {
+        $users = $this->FreePBX->Core->getAllUsers();
+        $list = [];
+        foreach ($users as $user) {
+            $list[$user['extension']] = $user['extension'] . ' (' . $user['name'] . ')';
+        }
+        return $list;
+    }
+
+public function getDids() {
     try {
-        $sth = $this->db->prepare($sql);
-        $sth->execute([':start' => $startTime, ':end' => $endTime]);
-        $rows = $sth->fetchAll(\PDO::FETCH_ASSOC);
+        $list = [];
 
-        $count = count($rows);
-        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " [MISSED] найдено " . $count . " пропущенных входящих (логика как в таблице Состав статистики)\n", FILE_APPEND);
-        return $rows;
+        // 1. DID из Inbound Routes FreePBX
+        $sql = "SELECT DISTINCT extension FROM incoming WHERE extension != '' ORDER BY extension";
+        $sth = $this->configDb->query($sql);
+        $dids = $sth->fetchAll(\PDO::FETCH_COLUMN);
 
-    } catch (\PDOException $e) {
-        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " [MISSED] ERROR: " . $e->getMessage() . "\n", FILE_APPEND);
+        foreach ($dids as $did) {
+            $did = trim($did);
+            if (empty($did)) continue;
+            $list[$did] = $did;
+            // БЛОК С 10-ЗНАЧНЫМИ УДАЛЁН НАВСЕГДА (был причиной дублей)
+        }
+
+        // 2. Реальные номера из CDR (60 дней)
+        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getDids: добавляем реальные DID из CDR\n", FILE_APPEND);
+
+        $fallbackSql = "
+            SELECT DISTINCT COALESCE(NULLIF(TRIM(outbound_cnum),''), dst) as did
+            FROM cdr 
+            WHERE calldate > DATE_SUB(NOW(), INTERVAL 60 DAY)
+              AND LENGTH(COALESCE(NULLIF(TRIM(outbound_cnum),''), dst)) BETWEEN 7 AND 15
+            GROUP BY did
+            HAVING COUNT(DISTINCT linkedid) >= 1
+            ORDER BY COUNT(*) DESC
+            LIMIT 50
+        ";
+
+        $sth = $this->db->query($fallbackSql);
+        $fallback = $sth->fetchAll(\PDO::FETCH_COLUMN);
+
+        foreach ($fallback as $d) {
+            $d = trim($d);
+            if ($d && !isset($list[$d])) {
+                $list[$d] = $d;
+            }
+        }
+
+        // === УДАЛЕНИЕ ВСЕХ ДУБЛЕЙ 10-значных ===
+        $cleanList = [];
+        foreach ($list as $key => $value) {
+            if (strlen($key) === 10) {
+                $full = '7' . $key;
+                if (isset($list[$full])) {
+                    continue; // пропускаем короткий дубль
+                }
+            }
+            $cleanList[$key] = $value;
+        }
+
+        // Красивая сортировка: 11-значные номера сверху
+        uksort($cleanList, function($a, $b) {
+            $la = strlen($a); $lb = strlen($b);
+            if ($la !== $lb) return $lb - $la;
+            return strcmp($a, $b);
+        });
+
+        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getDids() → " . count($cleanList) . " уникальных DID (дубли 491... удалены)\n", FILE_APPEND);
+
+        return $cleanList;
+
+    } catch (\Exception $e) {
+        file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getDids ERROR: " . $e->getMessage() . "\n", FILE_APPEND);
         return [];
     }
 }
+    public function getQueues() {
+        try {
+            $sql = "SELECT extension FROM queues_config ORDER BY extension";
+            $sth = $this->configDb->query($sql);
+            $queues = $sth->fetchAll(\PDO::FETCH_COLUMN);
+            $list = [];
+            foreach ($queues as $q) $list[$q] = $q;
+            return $list;
+        } catch (\Exception $e) {
+            file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getQueues error: " . $e->getMessage() . "\n", FILE_APPEND);
+            return [];
+        }
+    }
 
+    public function install() { file_put_contents($this->logPath, date('Y-m-d H:i:s') . " Install called\n", FILE_APPEND); }
+    public function uninstall() {}
+    public function backup() {}
+    public function restore($backup) {}
+    public function doConfigPageInit($page) {}
+
+    // ====================== ГЛАВНЫЙ МЕТОД ======================
     public function showPage() {
         if (isset($_REQUEST['export']) && $_REQUEST['export'] === 'csv' && isset($_REQUEST['view']) && $_REQUEST['view'] === 'grid_stats') {
             $this->exportCsv();
@@ -803,52 +754,32 @@ public function getMissedInboundCalls($start, $end) {
         switch ($view) {
             case 'grid_stats':
                 list($startDate, $endDate) = $this->parseDateRange();
-                $extension = $_REQUEST['ext'] ?? '';
-                $extRange = $_REQUEST['ext_range'] ?? '';
-                $queue = $_REQUEST['queue'] ?? '';
-
-                $filter = [];
-                if ($extension) $filter['extension'] = $extension;
-                if ($extRange) $filter['ext_range'] = $extRange;
-                if ($queue) $filter['queue'] = $queue;
-
-                $data = $this->getCallStats($startDate, $endDate, $filter);
-                $extensionsList = $this->getExtensions();
-                $queuesList = $this->getQueues();
+                $data = $this->getCallStats($startDate, $endDate, [
+                    'extension' => $_REQUEST['ext'] ?? '',
+                    'ext_range' => $_REQUEST['ext_range'] ?? '',
+                    'queue'     => $_REQUEST['queue'] ?? ''
+                ]);
                 $content = load_view(__DIR__ . '/views/grid_stats.php', [
-                    'data' => $data,
-                    'startDate' => $startDate,
-                    'endDate' => $endDate,
-                    'ext' => $extension,
-                    'extRange' => $extRange,
-                    'queue' => $queue,
-                    'extensionsList' => $extensionsList,
-                    'queuesList' => $queuesList
+                    'data' => $data, 'startDate' => $startDate, 'endDate' => $endDate,
+                    'extensionsList' => $this->getExtensions(), 'queuesList' => $this->getQueues()
                 ]);
                 break;
 
             case 'outbound_did_stats':
                 list($startDate, $endDate) = $this->parseDateRange();
                 $did = $_REQUEST['did'] ?? '';
-
                 $data = $this->getOutboundDidStats($startDate, $endDate, $did);
-                $didsList = $this->getDids();
+                $didsList = $this->getOutboundDidsForPeriod($startDate, $endDate);
 
-                
                 if (empty($did) && !empty($data['did_summary'])) {
                     usort($data['did_summary'], fn($a, $b) => $b['calls'] <=> $a['calls']);
                 }
 
                 $content = load_view(__DIR__ . '/views/outbound_did_stats.php', [
-                    'data'       => $data,
-                    'statsByHour'=> $data['stats'] ?? [],          
-                    'startDate'  => $startDate,
-                    'endDate'    => $endDate,
-                    'did'        => $did,
-                    'didsList'   => $didsList
+                    'data' => $data, 'statsByHour' => $data['stats'] ?? [],
+                    'startDate' => $startDate, 'endDate' => $endDate, 'did' => $did, 'didsList' => $didsList
                 ]);
                 break;
-
 
             case 'per_ext_stats':
                 list($startDate, $endDate) = $this->parseDateRange();
@@ -904,26 +835,18 @@ public function getMissedInboundCalls($start, $end) {
                 break;
 
             case 'get_unique_exts':
-               list($startDate, $endDate) = $this->parseDateRange();
+                list($startDate, $endDate) = $this->parseDateRange();
                 $did = $_REQUEST['did'] ?? '';
-            
-            // логирование
-            $logDid = isset($did) && $did !== '' ? $did : '—';
-            $logRange = $_REQUEST['daterange'] ?? '—';
-            
-            file_put_contents(
-                $this->logPath,
-                date('Y-m-d H:i:s') . " AJAX get_unique_exts called | did=$logDid | daterange=$logRange\n",
-                FILE_APPEND
-            );
-
-            if ($did !== '') {
-                $exts = $this->getUniqueExtensionsForDid($startDate, $endDate, $did);
-                header('Content-Type: application/json');
-                echo json_encode(['extensions' => $exts]);
-                exit;
-            }
-            break;
+                $logDid = $did !== '' ? $did : '—';
+                $logRange = $_REQUEST['daterange'] ?? '—';
+                file_put_contents($this->logPath, date('Y-m-d H:i:s') . " AJAX get_unique_exts called | did=$logDid | daterange=$logRange\n", FILE_APPEND);
+                if ($did !== '') {
+                    $exts = $this->getUniqueExtensionsForDid($startDate, $endDate, $did);
+                    header('Content-Type: application/json');
+                    echo json_encode(['extensions' => $exts]);
+                    exit;
+                }
+                break;
 
             case 'missed_inbound':
                 list($startDate, $endDate) = $this->parseDateRange();
@@ -933,18 +856,39 @@ public function getMissedInboundCalls($start, $end) {
                     'startDate' => $startDate,
                     'endDate'   => $endDate
                 ]);
-                break;                
+                break;
 
             default:
                 $content = load_view(__DIR__ . '/views/grid_stats.php', []);
-                break;
         }
 
         $serverName = gethostname();
         return load_view(__DIR__ . '/views/default.php', [
-            'subhead' => $subhead,
-            'content' => $content,
-            'serverName' => $serverName
+            'subhead' => $subhead, 'content' => $content, 'serverName' => $serverName
         ]);
+    }
+
+    private function exportCsv() {
+        $start  = $_REQUEST['start'] ?? date('Y-m-d');
+        $end    = $_REQUEST['end'] ?? date('Y-m-d');
+        $filter = ['extension' => $_REQUEST['ext'] ?? '', 'ext_range' => $_REQUEST['ext_range'] ?? '', 'queue' => $_REQUEST['queue'] ?? ''];
+
+        $data = $this->getCallStats($start, $end, $filter);
+
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="cdr_stats_' . $start . '_' . $end . '.csv"');
+        header('Pragma: no-cache');
+
+        $out = fopen('php://output', 'w');
+        fputcsv($out, ['Дата звонка', 'От', 'Кому', 'Звонков', 'Длительность (сек)', 'Отвечено', 'Пропущено']);
+
+        foreach ($data['by_ext'] as $row) {
+            fputcsv($out, [
+                $row['call_date'], $row['src_ext'], $row['dst_ext'],
+                $row['calls'], $row['total_duration'], $row['answered'], $row['missed']
+            ]);
+        }
+        fclose($out);
+        exit;
     }
 }
