@@ -195,11 +195,10 @@ class Customcdrstats implements \BMO {
         return array_values($hourly);
     }
 
-    public function getDidStats($start, $end, $did = '') {
+public function getDidStats($start, $end, $did = '') {
     $startTime = $start . ' 00:00:00';
     $endTime   = $end . ' 23:59:59';
 
-    // === Один лёгкий запрос — точно такой же фильтр, как был в SQL ===
     $sql = "
         SELECT 
             linkedid,
@@ -214,7 +213,6 @@ class Customcdrstats implements \BMO {
         FROM cdr 
         WHERE calldate BETWEEN ? AND ? 
           AND did != '' 
-          AND LENGTH(dst) < 8 
           AND (outbound_cnum = '' OR outbound_cnum IS NULL)
           AND channel NOT LIKE '%FMGL-%' 
           AND channel NOT LIKE '%followme%'";
@@ -517,11 +515,14 @@ private function processDidStatsInPhp(array $rows, $specificDid = ''): array {
         $hour = (int)substr($first['calldate'], 11, 2);
         $realDid = trim($first['did']);
 
+        // === СТРОГАЯ ЛОГИКА КАК В MISSED_INBOUND И GRID_STATS ===
         $answeredFlag = 0;
         $maxBillsec   = 0;
         foreach ($callRows as $r) {
-            if (($r['disposition'] === 'ANSWERED' || $r['billsec'] > 0) && strlen(trim($r['dst'])) <= 6) {
+            $dlen = strlen(trim($r['dst']));
+            if ($dlen >= 3 && $dlen <= 6 && $r['disposition'] === 'ANSWERED') {
                 $answeredFlag = 1;
+                // можно break, но оставляем полный цикл для maxBillsec
             }
             if ($r['billsec'] > $maxBillsec) $maxBillsec = $r['billsec'];
         }
@@ -558,16 +559,16 @@ private function processDidStatsInPhp(array $rows, $specificDid = ''): array {
         $s['avg_duration'] = $s['calls'] > 0 ? round($s['total_duration'] / $s['calls']) : 0;
     }
 
-    // Сортировка сводки
     usort($summary, fn($a,$b) => $b['calls'] <=> $a['calls']);
 
-    file_put_contents($this->logPath, date('Y-m-d H:i:s') . " [PHP] processDidStatsInPhp → " . count($byLinked) . " звонков обработано\n", FILE_APPEND);
+    file_put_contents($this->logPath, date('Y-m-d H:i:s') . " [PHP] processDidStatsInPhp → " . count($byLinked) . " звонков → missed теперь считается строго (как в missed_inbound)\n", FILE_APPEND);
 
     return [
         'stats'       => array_values($hourly),
         'did_summary' => $summary
     ];
 }
+
 private function processOutboundDidStatsInPhp(array $rows, $specificDid = ''): array {
     $byLinked = [];
     foreach ($rows as $row) {
