@@ -862,27 +862,64 @@ public function getDids() {
         ]);
     }
 
-    private function exportCsv() {
-        $start  = $_REQUEST['start'] ?? date('Y-m-d');
-        $end    = $_REQUEST['end'] ?? date('Y-m-d');
-        $filter = ['extension' => $_REQUEST['ext'] ?? '', 'ext_range' => $_REQUEST['ext_range'] ?? '', 'queue' => $_REQUEST['queue'] ?? ''];
-
-        $data = $this->getCallStats($start, $end, $filter);
-
-        header('Content-Type: text/csv; charset=utf-8');
-        header('Content-Disposition: attachment; filename="cdr_stats_' . $start . '_' . $end . '.csv"');
-        header('Pragma: no-cache');
-
-        $out = fopen('php://output', 'w');
-        fputcsv($out, ['Дата звонка', 'От', 'Кому', 'Звонков', 'Длительность (сек)', 'Отвечено', 'Пропущено']);
-
-        foreach ($data['by_ext'] as $row) {
-            fputcsv($out, [
-                $row['call_date'], $row['src_ext'], $row['dst_ext'],
-                $row['calls'], $row['total_duration'], $row['answered'], $row['missed']
-            ]);
-        }
-        fclose($out);
-        exit;
+private function exportCsv() {
+    while (ob_get_level()) {
+        ob_end_clean();
     }
+
+    $start  = $_REQUEST['start'] ?? date('Y-m-d');
+    $end    = $_REQUEST['end'] ?? date('Y-m-d');
+    $filter = [
+        'extension' => $_REQUEST['ext'] ?? '',
+        'ext_range' => $_REQUEST['ext_range'] ?? '',
+        'queue'     => $_REQUEST['queue'] ?? ''
+    ];
+
+    $data = $this->getCallStats($start, $end, $filter);
+
+    // === Заголовки ===
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="cdr_stats_' . $start . '_' . $end . '.csv"');
+    header('Pragma: no-cache');
+    header('Expires: 0');
+    header('Cache-Control: must-revalidate');
+
+    // UTF-8 BOM — чтобы Excel видел русский текст
+    echo "\xEF\xBB\xBF";
+
+    $out = fopen('php://output', 'w');
+
+    // Заголовки (точно как в таблице на странице)
+    fputcsv($out, [
+        'Дата звонка',
+        'Тип',
+        'От',
+        'Кому',
+        'Звонков',
+        'Длительность (сек)',
+        'Средняя (сек)',
+        'Отвечено',
+        'Пропущено вх.',
+        'Недозвонились исх.'
+    ], ';');
+
+    // Данные
+    foreach ($data['by_ext'] as $row) {
+        fputcsv($out, [
+            $row['call_date'] ?? '',
+            $row['operator_type'] ?? 'Unknown',
+            $row['src_ext'] ?? '',
+            $row['dst_ext'] ?? '',
+            $row['calls'] ?? 0,
+            $row['total_duration'] ?? 0,
+            round($row['avg_duration'] ?? 0),
+            $row['answered'] ?? 0,
+            $row['missed_inbound'] ?? 0,
+            $row['missed_outbound'] ?? 0
+        ], ';');
+    }
+
+    fclose($out);
+    exit;
+}
 }
