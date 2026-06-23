@@ -97,6 +97,33 @@ foreach ($data as $row) {
             <?php endfor; ?>
         </tbody>
     </table>
+
+    <?php if (!empty($did) && !empty($callList)): ?>
+    <h4>Список звонков</h4>
+    <table class="table table-striped table-bordered" style="width:100%">
+        <thead>
+            <tr>
+                <th>Дата/Время</th>
+                <th>Источник</th>
+                <th>Номер назначения</th>
+                <th>Длительность (сек)</th>
+                <th>Статус</th>
+            </tr>
+        </thead>
+        <tbody>
+            <?php foreach ($callList as $call): ?>
+            <tr>
+                <td><?php echo htmlspecialchars($call['calldate']); ?></td>
+                <td><?php echo htmlspecialchars($call['src']); ?></td>
+                <td><?php echo htmlspecialchars($call['dst']); ?></td>
+                <td><?php echo htmlspecialchars($call['billsec']); ?></td>
+                <td><?php echo htmlspecialchars($call['disposition']); ?></td>
+            </tr>
+            <?php endforeach; ?>
+        </tbody>
+    </table>
+    <?php endif; ?>
+
 <?php else: ?>
     <p>Нет данных за выбранный период.</p>
 <?php endif; ?>

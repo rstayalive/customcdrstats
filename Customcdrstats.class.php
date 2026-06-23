@@ -237,6 +237,81 @@ public function getDidStats($start, $end, $did = '') {
     }
 }
 
+    public function getDidCallList($start, $end, $did) {
+        $startTime = $start . ' 00:00:00';
+        $endTime   = $end . ' 23:59:59';
+
+        $sql = "
+            SELECT 
+                linkedid,
+                calldate,
+                src,
+                dst,
+                did,
+                billsec,
+                duration,
+                disposition
+            FROM cdr 
+            WHERE calldate BETWEEN ? AND ? 
+              AND did = ?
+              AND did != '' 
+              AND (outbound_cnum = '' OR outbound_cnum IS NULL)
+              AND channel NOT LIKE '%FMGL-%' 
+              AND channel NOT LIKE '%followme%'
+            ORDER BY linkedid, calldate ASC";
+
+        $params = [$startTime, $endTime, $did];
+
+        try {
+            $sth = $this->db->prepare($sql);
+            $sth->execute($params);
+            $rows = $sth->fetchAll(\PDO::FETCH_ASSOC);
+
+            // Group by linkedid — одна CDR-строка ≠ один звонок
+            $byLinked = [];
+            foreach ($rows as $row) {
+                $lid = $row['linkedid'];
+                if (!isset($byLinked[$lid])) $byLinked[$lid] = [];
+                $byLinked[$lid][] = $row;
+            }
+
+            $calls = [];
+            foreach ($byLinked as $callRows) {
+                usort($callRows, fn($a,$b) => strtotime($a['calldate']) <=> strtotime($b['calldate']));
+                $first = $callRows[0];
+
+                $answeredFlag = 0;
+                $maxBillsec = 0;
+                foreach ($callRows as $r) {
+                    $dlen = strlen(trim($r['dst']));
+                    if ($dlen >= 3 && $dlen <= 6 && $r['disposition'] === 'ANSWERED') {
+                        $answeredFlag = 1;
+                    }
+                    if ($r['billsec'] > $maxBillsec) $maxBillsec = $r['billsec'];
+                }
+
+                $calls[] = [
+                    'calldate'    => $first['calldate'],
+                    'src'         => $first['src'],
+                    'dst'         => $first['dst'],
+                    'did'         => $first['did'],
+                    'billsec'     => $maxBillsec,
+                    'disposition' => $answeredFlag ? 'ANSWERED' : 'NO ANSWER',
+                ];
+            }
+
+            // Newest first
+            usort($calls, fn($a,$b) => strtotime($b['calldate']) <=> strtotime($a['calldate']));
+
+            file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getDidCallList для DID '$did' → " . count($rows) . " CDR-строк → " . count($calls) . " звонков\n", FILE_APPEND);
+
+            return $calls;
+        } catch (\PDOException $e) {
+            file_put_contents($this->logPath, date('Y-m-d H:i:s') . " getDidCallList ERROR: " . $e->getMessage() . "\n", FILE_APPEND);
+            return [];
+        }
+    }
+
     public function getOutboundDidStats($start, $end, $did = '') {
         $startTime = $start . ' 00:00:00';
         $endTime   = $end . ' 23:59:59';
@@ -794,13 +869,15 @@ public function getDids() {
                 $did = $_REQUEST['did'] ?? '';
                 $data = $this->getDidStats($startDate, $endDate, $did);
                 $didsList = $this->getDids();
+                $callList = ($did !== '') ? $this->getDidCallList($startDate, $endDate, $did) : [];
                 $content = load_view(__DIR__ . '/views/did_stats.php', [
                     'data' => $data['stats'],
                     'didSummary' => $data['did_summary'],
                     'startDate' => $startDate,
                     'endDate' => $endDate,
                     'did' => $did,
-                    'didsList' => $didsList
+                    'didsList' => $didsList,
+                    'callList' => $callList
                 ]);
                 break;
 
